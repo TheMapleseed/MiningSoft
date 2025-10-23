@@ -6,6 +6,10 @@
 #include <mutex>
 #include <thread>
 #include <chrono>
+#include <exception>
+#include <stdexcept>
+#include <new>
+#include <functional>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <mach/mach.h>
@@ -41,6 +45,31 @@ enum class InstanceType {
     AUTO_SCALE  // Auto-scale based on resources
 };
 
+enum class MemoryErrorType {
+    ALLOCATION_FAILED,
+    DEALLOCATION_FAILED,
+    ALIGNMENT_FAILED,
+    LOCK_FAILED,
+    UNLOCK_FAILED,
+    POOL_EXHAUSTED,
+    INVALID_POINTER,
+    RESOURCE_EXHAUSTED,
+    HARDWARE_ACCELERATION_FAILED
+};
+
+class MemoryException : public std::runtime_error {
+public:
+    MemoryException(MemoryErrorType type, const std::string& message, size_t size = 0)
+        : std::runtime_error(message), m_type(type), m_size(size) {}
+    
+    MemoryErrorType getType() const { return m_type; }
+    size_t getSize() const { return m_size; }
+    
+private:
+    MemoryErrorType m_type;
+    size_t m_size;
+};
+
 struct MemoryStats {
     size_t totalAllocated;
     size_t totalAvailable;
@@ -72,6 +101,14 @@ public:
     size_t getAllocatedBlocks() const;
     double getUtilization() const;
     
+    // Error handling and logging
+    void logMemoryOperation(const std::string& operation, size_t size, void* ptr = nullptr) const;
+    void logMemoryError(MemoryErrorType type, const std::string& message, size_t size = 0) const;
+    void logMemoryStats() const;
+    bool validatePointer(void* ptr) const;
+    void setCustomNewHandler();
+    void restoreNewHandler();
+    
 private:
     // Hardware acceleration helpers
     void encodeWithNEON(void* data, size_t size);
@@ -94,6 +131,9 @@ private:
     // Hardware acceleration buffers
     void* m_neonBuffer;
     void* m_accelerateBuffer;
+    
+    // Error handling
+    std::new_handler m_originalNewHandler;
     
     // Memory alignment helpers
     size_t alignSize(size_t size) const;
@@ -147,6 +187,15 @@ public:
     void enableNEONOptimizations(bool enable = true);
     void enableAccelerateFramework(bool enable = true);
     
+    // Error handling and logging
+    void logMemoryManagerStats() const;
+    void logInstanceOperation(size_t instanceId, const std::string& operation) const;
+    void logResourceUsage() const;
+    void logError(MemoryErrorType type, const std::string& message, size_t instanceId = 0) const;
+    bool validateInstance(size_t instanceId) const;
+    void emergencyCleanup();
+    void setMemoryErrorHandler(std::function<void(MemoryErrorType, const std::string&)> handler);
+    
 private:
     // Memory pools for different modes
     std::unique_ptr<MemoryPool> m_fastPool;
@@ -189,6 +238,10 @@ private:
     size_t m_availableMemory;
     size_t m_cpuCores;
     size_t m_pageSize;
+    
+    // Error handling
+    std::function<void(MemoryErrorType, const std::string&)> m_errorHandler;
+    std::new_handler m_originalNewHandler;
     
     // Helper methods
     bool detectSystemResources();

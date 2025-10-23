@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <random>
 #include <cstring>
+#include <functional>
 #include <sys/sysctl.h>
 #include <mach/mach.h>
 #include <mach/vm_statistics.h>
@@ -38,9 +39,18 @@ MemoryPool::MemoryPool(size_t blockSize, size_t poolSize, bool useHardwareAccele
     if (m_useHardwareAcceleration) {
         m_neonBuffer = allocateAligned(APPLE_SILICON_CACHE_LINE);
         m_accelerateBuffer = allocateAligned(m_blockSize);
+        
+        if (!m_neonBuffer || !m_accelerateBuffer) {
+            logMemoryError(MemoryErrorType::HARDWARE_ACCELERATION_FAILED, 
+                          "Failed to allocate hardware acceleration buffers", 0);
+        }
     }
     
+    // Set custom new handler for this pool
+    setCustomNewHandler();
+    
     LOG_INFO("MemoryPool created: {} blocks of {} bytes each", m_blocks.size(), m_blockSize);
+    logMemoryStats();
 }
 
 MemoryPool::~MemoryPool() {
@@ -63,22 +73,31 @@ void* MemoryPool::allocate() {
     for (size_t i = 0; i < m_blocks.size(); ++i) {
         if (!m_allocated[i]) {
             m_allocated[i] = true;
+            logMemoryOperation("ALLOCATED", m_blockSize, m_blocks[i]);
             return m_blocks[i];
         }
     }
     
+    logMemoryError(MemoryErrorType::POOL_EXHAUSTED, "No available blocks in pool", m_blockSize);
     return nullptr; // Pool exhausted
 }
 
 void MemoryPool::deallocate(void* ptr) {
     std::lock_guard<std::mutex> lock(m_mutex);
     
+    if (!validatePointer(ptr)) {
+        return;
+    }
+    
     for (size_t i = 0; i < m_blocks.size(); ++i) {
         if (m_blocks[i] == ptr) {
             m_allocated[i] = false;
+            logMemoryOperation("DEALLOCATED", m_blockSize, ptr);
             return;
         }
     }
+    
+    logMemoryError(MemoryErrorType::INVALID_POINTER, "Pointer not found in pool during deallocation", 0);
 }
 
 void MemoryPool::encodeMemory(void* data, size_t size) {
@@ -203,6 +222,97 @@ void MemoryPool::deallocateAligned(void* ptr) const {
     if (ptr) {
         munlock(ptr, 0); // Unlock memory
         free(ptr);
+    }
+}
+
+void MemoryPool::logMemoryOperation(const std::string& operation, size_t size, void* ptr) const {
+    LOG_DEBUG("MemoryPool {}: {} {} bytes at {}", 
+              m_useHardwareAcceleration ? "HW-ACCEL" : "STANDARD",
+              operation, size, ptr ? ptr : "nullptr");
+}
+
+void MemoryPool::logMemoryError(MemoryErrorType type, const std::string& message, size_t size) const {
+    std::string errorType;
+    switch (type) {
+        case MemoryErrorType::ALLOCATION_FAILED:
+            errorType = "ALLOCATION_FAILED";
+            break;
+        case MemoryErrorType::DEALLOCATION_FAILED:
+            errorType = "DEALLOCATION_FAILED";
+            break;
+        case MemoryErrorType::ALIGNMENT_FAILED:
+            errorType = "ALIGNMENT_FAILED";
+            break;
+        case MemoryErrorType::LOCK_FAILED:
+            errorType = "LOCK_FAILED";
+            break;
+        case MemoryErrorType::UNLOCK_FAILED:
+            errorType = "UNLOCK_FAILED";
+            break;
+        case MemoryErrorType::POOL_EXHAUSTED:
+            errorType = "POOL_EXHAUSTED";
+            break;
+        case MemoryErrorType::INVALID_POINTER:
+            errorType = "INVALID_POINTER";
+            break;
+        case MemoryErrorType::RESOURCE_EXHAUSTED:
+            errorType = "RESOURCE_EXHAUSTED";
+            break;
+        case MemoryErrorType::HARDWARE_ACCELERATION_FAILED:
+            errorType = "HARDWARE_ACCELERATION_FAILED";
+            break;
+    }
+    
+    LOG_ERROR("MemoryPool Error [{}]: {} (Size: {} bytes)", errorType, message, size);
+}
+
+void MemoryPool::logMemoryStats() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    
+    size_t allocated = getAllocatedBlocks();
+    size_t available = getAvailableBlocks();
+    double utilization = getUtilization();
+    
+    LOG_INFO("MemoryPool Stats: {} allocated, {} available, {:.2f}% utilization", 
+             allocated, available, utilization * 100.0);
+}
+
+bool MemoryPool::validatePointer(void* ptr) const {
+    if (!ptr) {
+        logMemoryError(MemoryErrorType::INVALID_POINTER, "Null pointer provided", 0);
+        return false;
+    }
+    
+    // Check if pointer is in our pool
+    for (const void* block : m_blocks) {
+        if (block == ptr) {
+            return true;
+        }
+    }
+    
+    logMemoryError(MemoryErrorType::INVALID_POINTER, "Pointer not found in pool", 0);
+    return false;
+}
+
+void MemoryPool::setCustomNewHandler() {
+    m_originalNewHandler = std::set_new_handler([]() {
+        LOG_CRITICAL("Global memory allocation failed - attempting emergency cleanup");
+        
+        // Try to free up memory from global memory manager
+        if (g_memoryManager) {
+            g_memoryManager->emergencyCleanup();
+        }
+        
+        // If we still can't allocate, terminate
+        LOG_CRITICAL("Emergency cleanup failed - terminating program");
+        std::terminate();
+    });
+}
+
+void MemoryPool::restoreNewHandler() {
+    if (m_originalNewHandler) {
+        std::set_new_handler(m_originalNewHandler);
+        m_originalNewHandler = nullptr;
     }
 }
 
@@ -395,7 +505,7 @@ bool RandomXMemoryManager::createInstance() {
     }
     
     if (!instance.memory) {
-        LOG_ERROR("Failed to allocate memory for instance {}", instance.id);
+        logError(MemoryErrorType::ALLOCATION_FAILED, "Failed to allocate memory for instance", instance.id);
         return false;
     }
     
@@ -433,16 +543,21 @@ bool RandomXMemoryManager::destroyInstance(size_t instanceId) {
 }
 
 void* RandomXMemoryManager::allocateRandomXMemory(size_t instanceId) {
+    if (!validateInstance(instanceId)) {
+        return nullptr;
+    }
+    
     std::lock_guard<std::mutex> lock(m_instanceMutex);
     
     auto it = std::find_if(m_instances.begin(), m_instances.end(),
                           [instanceId](const Instance& inst) { return inst.id == instanceId && inst.isActive; });
     
     if (it == m_instances.end()) {
-        LOG_ERROR("Instance {} not found or not active", instanceId);
+        logError(MemoryErrorType::INVALID_POINTER, "Instance not found or not active", instanceId);
         return nullptr;
     }
     
+    logInstanceOperation(instanceId, "Memory allocated");
     return it->memory;
 }
 
@@ -659,4 +774,143 @@ namespace MemoryUtils {
         __builtin___clear_cache(static_cast<char*>(ptr), 
                                static_cast<char*>(ptr) + size);
     }
+}
+
+// RandomXMemoryManager Error Handling and Logging Methods
+void RandomXMemoryManager::logMemoryManagerStats() const {
+    LOG_INFO("=== RandomX Memory Manager Statistics ===");
+    LOG_INFO("Total System Memory: {} MB", m_totalMemory / (1024 * 1024));
+    LOG_INFO("Available Memory: {} MB", m_availableMemory / (1024 * 1024));
+    LOG_INFO("Active Instances: {}", m_stats.instancesRunning);
+    LOG_INFO("Total Allocated: {} MB", m_stats.totalAllocated / (1024 * 1024));
+    LOG_INFO("Memory Utilization: {:.2f}%", m_stats.memoryUtilization * 100.0);
+    LOG_INFO("CPU Utilization: {:.2f}%", m_stats.cpuUtilization * 100.0);
+    LOG_INFO("Memory Mode: {}", m_memoryMode == MemoryMode::FAST ? "FAST" : "LIGHT");
+    LOG_INFO("Hardware Acceleration: {}", m_hardwareAccelerationEnabled ? "ENABLED" : "DISABLED");
+    LOG_INFO("==========================================");
+}
+
+void RandomXMemoryManager::logInstanceOperation(size_t instanceId, const std::string& operation) const {
+    LOG_DEBUG("Instance {}: {}", instanceId, operation);
+}
+
+void RandomXMemoryManager::logResourceUsage() const {
+    // Update stats without modifying the object
+    MemoryStats stats = m_stats;
+    stats.totalAllocated = 0;
+    stats.instancesRunning = 0;
+    
+    {
+        std::lock_guard<std::mutex> lock(m_instanceMutex);
+        for (const auto& instance : m_instances) {
+            if (instance.isActive) {
+                stats.totalAllocated += instance.memorySize;
+                stats.instancesRunning++;
+            }
+        }
+    }
+    
+    stats.totalAvailable = m_availableMemory;
+    stats.memoryUtilization = static_cast<double>(stats.totalAllocated) / m_totalMemory;
+    stats.cpuUtilization = static_cast<double>(stats.instancesRunning) / m_cpuCores;
+    
+    LOG_INFO("Resource Usage - Memory: {:.2f}%, CPU: {:.2f}%, Instances: {}", 
+             stats.memoryUtilization * 100.0, stats.cpuUtilization * 100.0, stats.instancesRunning);
+}
+
+void RandomXMemoryManager::logError(MemoryErrorType type, const std::string& message, size_t instanceId) const {
+    std::string errorType;
+    switch (type) {
+        case MemoryErrorType::ALLOCATION_FAILED:
+            errorType = "ALLOCATION_FAILED";
+            break;
+        case MemoryErrorType::DEALLOCATION_FAILED:
+            errorType = "DEALLOCATION_FAILED";
+            break;
+        case MemoryErrorType::ALIGNMENT_FAILED:
+            errorType = "ALIGNMENT_FAILED";
+            break;
+        case MemoryErrorType::LOCK_FAILED:
+            errorType = "LOCK_FAILED";
+            break;
+        case MemoryErrorType::UNLOCK_FAILED:
+            errorType = "UNLOCK_FAILED";
+            break;
+        case MemoryErrorType::POOL_EXHAUSTED:
+            errorType = "POOL_EXHAUSTED";
+            break;
+        case MemoryErrorType::INVALID_POINTER:
+            errorType = "INVALID_POINTER";
+            break;
+        case MemoryErrorType::RESOURCE_EXHAUSTED:
+            errorType = "RESOURCE_EXHAUSTED";
+            break;
+        case MemoryErrorType::HARDWARE_ACCELERATION_FAILED:
+            errorType = "HARDWARE_ACCELERATION_FAILED";
+            break;
+    }
+    
+    if (instanceId > 0) {
+        LOG_ERROR("MemoryManager Error [{}] Instance {}: {}", errorType, instanceId, message);
+    } else {
+        LOG_ERROR("MemoryManager Error [{}]: {}", errorType, message);
+    }
+    
+    // Call custom error handler if set
+    if (m_errorHandler) {
+        m_errorHandler(type, message);
+    }
+}
+
+bool RandomXMemoryManager::validateInstance(size_t instanceId) const {
+    std::lock_guard<std::mutex> lock(m_instanceMutex);
+    
+    auto it = std::find_if(m_instances.begin(), m_instances.end(),
+                          [instanceId](const Instance& inst) { return inst.id == instanceId; });
+    
+    if (it == m_instances.end()) {
+        logError(MemoryErrorType::INVALID_POINTER, "Instance not found", instanceId);
+        return false;
+    }
+    
+    if (!it->isActive) {
+        logError(MemoryErrorType::INVALID_POINTER, "Instance not active", instanceId);
+        return false;
+    }
+    
+    return true;
+}
+
+void RandomXMemoryManager::emergencyCleanup() {
+    LOG_CRITICAL("Performing emergency memory cleanup");
+    
+    std::lock_guard<std::mutex> lock(m_instanceMutex);
+    
+    // Destroy all instances
+    for (auto& instance : m_instances) {
+        if (instance.isActive) {
+            LOG_WARNING("Emergency cleanup: destroying instance {}", instance.id);
+            
+            // Deallocate memory
+            if (instance.mode == MemoryMode::FAST) {
+                m_fastPool->deallocate(instance.memory);
+            } else {
+                m_lightPool->deallocate(instance.memory);
+            }
+            
+            instance.isActive = false;
+        }
+    }
+    
+    m_instances.clear();
+    
+    // Log final stats
+    logMemoryManagerStats();
+    
+    LOG_CRITICAL("Emergency cleanup completed");
+}
+
+void RandomXMemoryManager::setMemoryErrorHandler(std::function<void(MemoryErrorType, const std::string&)> handler) {
+    m_errorHandler = handler;
+    LOG_INFO("Custom memory error handler set");
 }
