@@ -72,6 +72,61 @@ void Logger::critical(const std::string& message) {
     log(Level::Critical, message);
 }
 
+// Enhanced logging with categories
+void Logger::log(Level level, Category category, const std::string& message) {
+    std::string categoryStr = getCategoryString(category);
+    std::string fullMessage = "[" + categoryStr + "] " + message;
+    log(level, fullMessage);
+}
+
+void Logger::debug(Category category, const std::string& message) {
+    log(Level::Debug, category, message);
+}
+
+void Logger::info(Category category, const std::string& message) {
+    log(Level::Info, category, message);
+}
+
+void Logger::warning(Category category, const std::string& message) {
+    log(Level::Warning, category, message);
+}
+
+void Logger::error(Category category, const std::string& message) {
+    log(Level::Error, category, message);
+}
+
+void Logger::critical(Category category, const std::string& message) {
+    log(Level::Critical, category, message);
+}
+
+// Structured logging
+void Logger::logEvent(const std::string& event, const std::string& details, 
+                     Level level, Category category) {
+    std::string message = "EVENT: " + event;
+    if (!details.empty()) {
+        message += " - " + details;
+    }
+    log(level, category, message);
+}
+
+void Logger::logError(const std::string& error, const std::string& context, Category category) {
+    std::string message = "ERROR: " + error;
+    if (!context.empty()) {
+        message += " (Context: " + context + ")";
+    }
+    log(Level::Error, category, message);
+}
+
+void Logger::logPerformance(const std::string& metric, double value, 
+                           const std::string& unit, Category category) {
+    std::ostringstream oss;
+    oss << "PERF: " << metric << " = " << std::fixed << std::setprecision(2) << value;
+    if (!unit.empty()) {
+        oss << " " << unit;
+    }
+    log(Level::Info, category, oss.str());
+}
+
 // Template methods are implemented in header
 
 void Logger::flush() {
@@ -93,6 +148,25 @@ Logger::LogStats Logger::getStats() const {
     stats.lastFlush = std::chrono::steady_clock::now();
     
     return stats;
+}
+
+std::string Logger::getCategoryString(Category category) {
+    switch (category) {
+        case Category::General: return "GEN";
+        case Category::Mining: return "MIN";
+        case Category::Network: return "NET";
+        case Category::Wallet: return "WLT";
+        case Category::Performance: return "PERF";
+        case Category::Thermal: return "TEMP";
+        case Category::Memory: return "MEM";
+        case Category::RandomX: return "RX";
+        case Category::Pool: return "POOL";
+        case Category::CLI: return "CLI";
+        case Category::Config: return "CFG";
+        case Category::System: return "SYS";
+        case Category::Test: return "TEST";
+        default: return "UNK";
+    }
 }
 
 void Logger::log(Level level, const std::string& message) {

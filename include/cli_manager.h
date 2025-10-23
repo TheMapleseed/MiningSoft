@@ -50,6 +50,25 @@ public:
     void handleDisconnect(const std::vector<std::string>& args);
     void handleSet(const std::vector<std::string>& args);
     void handleShow(const std::vector<std::string>& args);
+    void handleWallet(const std::vector<std::string>& args);
+    
+    // Wallet management
+    void showWalletMenu();
+    void addWalletAddress();
+    void viewWalletAddresses();
+    void setActiveWallet();
+    void removeWalletAddress();
+    void importWalletFromFile();
+    void exportWalletToFile();
+    bool validateWalletAddress(const std::string& address);
+    void saveWalletConfig();
+    void loadWalletConfig();
+    std::string getCurrentDateTime();
+    
+    // Command-line wallet functions
+    void addWalletFromCommandLine(const std::vector<std::string>& args);
+    void setActiveWalletFromCommandLine(const std::string& indexStr);
+    void removeWalletFromCommandLine(const std::string& indexStr);
     
     // Statistics and monitoring
     void updateStats();
@@ -91,6 +110,23 @@ private:
     std::atomic<bool> m_running;
     std::atomic<bool> m_interactive;
     std::thread m_statsThread;
+    
+    // Wallet management
+    struct WalletInfo {
+        std::string address;
+        std::string label;
+        std::string type; // "mainnet", "testnet", "integrated"
+        bool isActive;
+        std::string addedDate;
+        
+        WalletInfo() : isActive(false) {}
+        WalletInfo(const std::string& addr, const std::string& lbl, const std::string& t)
+            : address(addr), label(lbl), type(t), isActive(false) {}
+    };
+    
+    std::vector<WalletInfo> m_wallets;
+    std::string m_activeWallet;
+    std::string m_walletConfigFile;
     
     // Helper methods
     void registerCommands();

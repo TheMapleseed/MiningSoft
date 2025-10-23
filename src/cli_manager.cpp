@@ -7,15 +7,17 @@
 #include <chrono>
 #include <thread>
 #include <cstdlib>
+#include <limits>
 
 #ifdef _WIN32
 #include <windows.h>
 #else
 #include <unistd.h>
 #include <termios.h>
+#include <sys/ioctl.h>
 #endif
 
-CLIManager::CLIManager() : m_running(false), m_interactive(false) {
+CLIManager::CLIManager() : m_running(false), m_interactive(false), m_walletConfigFile("wallets.json") {
     m_miner = std::make_unique<Miner>();
     m_config = std::make_unique<ConfigManager>();
     m_logger = std::make_unique<Logger>();
@@ -45,6 +47,9 @@ bool CLIManager::initialize() {
         std::cout << "Warning: Could not load config.json, using defaults" << std::endl;
     }
     
+    // Load wallet configuration
+    loadWalletConfig();
+    
     return true;
 }
 
@@ -61,6 +66,7 @@ void CLIManager::registerCommands() {
     m_commands["disconnect"] = [this](const std::vector<std::string>& args) { handleDisconnect(args); };
     m_commands["set"] = [this](const std::vector<std::string>& args) { handleSet(args); };
     m_commands["show"] = [this](const std::vector<std::string>& args) { handleShow(args); };
+    m_commands["wallet"] = [this](const std::vector<std::string>& args) { handleWallet(args); };
     m_commands["clear"] = [this](const std::vector<std::string>& args) { clearScreen(); };
 }
 
@@ -69,7 +75,8 @@ void CLIManager::run() {
     printHelp();
     
     m_running = true;
-    m_interactive = true;
+    // Check if input is piped (non-interactive)
+    m_interactive = isatty(STDIN_FILENO);
     
     // Start stats monitoring thread
     m_statsThread = std::thread([this]() {
@@ -85,8 +92,28 @@ void CLIManager::run() {
 void CLIManager::runInteractive() {
     std::string input;
     
-    while (m_running && m_interactive) {
-        printPrompt();
+    while (m_running) {
+        // Only show prompt in interactive mode
+        if (m_interactive) {
+            printPrompt();
+        }
+        
+        // Check if input stream is still valid
+        if (!std::cin.good()) {
+            if (std::cin.eof()) {
+                // Input stream ended (piped input), exit gracefully
+                if (m_interactive) {
+                    std::cout << "\nInput stream ended. Exiting..." << std::endl;
+                }
+                break;
+            } else {
+                // Clear error state and continue
+                std::cin.clear();
+                std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+                continue;
+            }
+        }
+        
         std::getline(std::cin, input);
         
         if (input.empty()) continue;
@@ -97,16 +124,33 @@ void CLIManager::runInteractive() {
         std::string command = args[0];
         std::transform(command.begin(), command.end(), command.begin(), ::tolower);
         
+        // Handle exit commands
+        if (command == "exit" || command == "quit") {
+            handleExit(args);
+            break;
+        }
+        
         auto it = m_commands.find(command);
         if (it != m_commands.end()) {
             try {
-                it->second(args);
+                // For wallet command, pass subcommands (everything after the main command)
+                if (command == "wallet") {
+                    std::vector<std::string> subargs(args.begin() + 1, args.end());
+                    it->second(subargs);
+                } else {
+                    it->second(args);
+                }
             } catch (const std::exception& e) {
                 std::cout << "Error executing command: " << e.what() << std::endl;
             }
         } else {
             std::cout << "Unknown command: " << command << std::endl;
             std::cout << "Type 'help' for available commands" << std::endl;
+        }
+        
+        // Add a small delay to make output more readable when processing multiple commands
+        if (!m_interactive) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
 }
@@ -318,6 +362,7 @@ void CLIManager::printHelp() {
     std::cout << "config [show|load|save]  - Configuration management" << std::endl;
     std::cout << "set <key> <value>        - Set configuration value" << std::endl;
     std::cout << "show <item>              - Show specific information" << std::endl;
+    std::cout << "wallet [add|list|set]    - Wallet address management" << std::endl;
     std::cout << "clear                    - Clear screen" << std::endl;
     std::cout << "help                     - Show this help" << std::endl;
     std::cout << "exit/quit                - Exit program" << std::endl;
@@ -434,4 +479,467 @@ void CLIManager::clearScreen() {
 
 void CLIManager::printSeparator() {
     std::cout << "──────────────────────────────────────────────────────────────" << std::endl;
+}
+
+// Wallet Management Implementation
+void CLIManager::handleWallet(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        showWalletMenu();
+        return;
+    }
+    
+    std::string subcommand = args[0];
+    std::vector<std::string> subargs(args.begin() + 1, args.end());
+    
+    if (subcommand == "add" || subcommand == "new") {
+        if (subargs.size() >= 1) {
+            // Command line mode: wallet add <address> [label]
+            addWalletFromCommandLine(subargs);
+        } else {
+            addWalletAddress();
+        }
+    } else if (subcommand == "list" || subcommand == "view") {
+        viewWalletAddresses();
+    } else if (subcommand == "set" || subcommand == "active") {
+        if (subargs.size() >= 1) {
+            // Command line mode: wallet set <index>
+            setActiveWalletFromCommandLine(subargs[0]);
+        } else {
+            setActiveWallet();
+        }
+    } else if (subcommand == "remove" || subcommand == "delete") {
+        if (subargs.size() >= 1) {
+            // Command line mode: wallet remove <index>
+            removeWalletFromCommandLine(subargs[0]);
+        } else {
+            removeWalletAddress();
+        }
+    } else if (subcommand == "import") {
+        importWalletFromFile();
+    } else if (subcommand == "export") {
+        exportWalletToFile();
+    } else {
+        std::cout << "❌ Unknown wallet command: " << subcommand << std::endl;
+        std::cout << "Use 'wallet' to see available commands." << std::endl;
+    }
+}
+
+void CLIManager::showWalletMenu() {
+    std::cout << "\n💰 Wallet Address Management" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    std::cout << "1. Add New Wallet Address" << std::endl;
+    std::cout << "2. View All Wallet Addresses" << std::endl;
+    std::cout << "3. Set Active Wallet Address" << std::endl;
+    std::cout << "4. Remove Wallet Address" << std::endl;
+    std::cout << "5. Import Wallets from File" << std::endl;
+    std::cout << "6. Export Wallets to File" << std::endl;
+    std::cout << "7. Back to Main Menu" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    
+    // Check if we're in interactive mode
+    if (!m_interactive) {
+        std::cout << "\n❌ Interactive wallet menu requires terminal input." << std::endl;
+        std::cout << "Use specific wallet commands instead:" << std::endl;
+        std::cout << "  wallet add    - Add new wallet address" << std::endl;
+        std::cout << "  wallet list   - View all wallet addresses" << std::endl;
+        std::cout << "  wallet set    - Set active wallet address" << std::endl;
+        return;
+    }
+    
+    std::cout << "\nEnter your choice (1-7): ";
+    std::string choice;
+    std::getline(std::cin, choice);
+    
+    if (choice == "1") {
+        addWalletAddress();
+    } else if (choice == "2") {
+        viewWalletAddresses();
+    } else if (choice == "3") {
+        setActiveWallet();
+    } else if (choice == "4") {
+        removeWalletAddress();
+    } else if (choice == "5") {
+        importWalletFromFile();
+    } else if (choice == "6") {
+        exportWalletToFile();
+    } else if (choice == "7") {
+        std::cout << "Returning to main menu..." << std::endl;
+    } else {
+        std::cout << "❌ Invalid choice. Please try again." << std::endl;
+    }
+}
+
+void CLIManager::addWalletAddress() {
+    std::cout << "\n🔑 Add New Wallet Address" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    
+    // Check if we're in interactive mode
+    if (!m_interactive) {
+        std::cout << "\n❌ Interactive wallet addition requires terminal input." << std::endl;
+        std::cout << "Use: wallet add <address> [label]" << std::endl;
+        return;
+    }
+    
+    std::string address, label;
+    
+    std::cout << "Enter Monero wallet address: ";
+    std::getline(std::cin, address);
+    
+    if (!validateWalletAddress(address)) {
+        std::cout << "❌ Invalid Monero wallet address format!" << std::endl;
+        return;
+    }
+    
+    std::cout << "Enter a label for this wallet (optional): ";
+    std::getline(std::cin, label);
+    
+    if (label.empty()) {
+        label = "Wallet " + std::to_string(m_wallets.size() + 1);
+    }
+    
+    // Determine wallet type
+    std::string type = "mainnet";
+    if (address[0] == '9') {
+        type = "testnet";
+    } else if (address.length() == 106) {
+        type = "integrated";
+    }
+    
+    // Add wallet
+    WalletInfo wallet(address, label, type);
+    wallet.addedDate = getCurrentDateTime();
+    
+    m_wallets.push_back(wallet);
+    
+    // If this is the first wallet, make it active
+    if (m_wallets.size() == 1) {
+        m_wallets[0].isActive = true;
+        m_activeWallet = address;
+        std::cout << "✅ Wallet added and set as active!" << std::endl;
+    } else {
+        std::cout << "✅ Wallet added successfully!" << std::endl;
+    }
+    
+    saveWalletConfig();
+}
+
+void CLIManager::viewWalletAddresses() {
+    std::cout << "\n📋 Wallet Addresses" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    
+    if (m_wallets.empty()) {
+        std::cout << "No wallet addresses found." << std::endl;
+        std::cout << "Use 'wallet add' to add your first wallet." << std::endl;
+        return;
+    }
+    
+    for (size_t i = 0; i < m_wallets.size(); i++) {
+        const auto& wallet = m_wallets[i];
+        std::cout << (i + 1) << ". ";
+        if (wallet.isActive) {
+            std::cout << "⭐ ";
+        }
+        std::cout << wallet.label << " (" << wallet.type << ")" << std::endl;
+        std::cout << "   Address: " << wallet.address << std::endl;
+        std::cout << "   Added: " << wallet.addedDate << std::endl;
+        std::cout << std::endl;
+    }
+    
+    if (!m_activeWallet.empty()) {
+        std::cout << "Active wallet: " << m_activeWallet << std::endl;
+    }
+}
+
+void CLIManager::setActiveWallet() {
+    if (m_wallets.empty()) {
+        std::cout << "❌ No wallet addresses found." << std::endl;
+        std::cout << "Use 'wallet add' to add your first wallet." << std::endl;
+        return;
+    }
+    
+    std::cout << "\n⭐ Set Active Wallet Address" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    
+    viewWalletAddresses();
+    
+    std::cout << "Enter wallet number to set as active (0 to cancel): ";
+    std::string choice;
+    std::getline(std::cin, choice);
+    
+    try {
+        int index = std::stoi(choice) - 1;
+        if (index >= 0 && index < static_cast<int>(m_wallets.size())) {
+            // Deactivate all wallets
+            for (auto& wallet : m_wallets) {
+                wallet.isActive = false;
+            }
+            
+            // Activate selected wallet
+            m_wallets[index].isActive = true;
+            m_activeWallet = m_wallets[index].address;
+            
+            std::cout << "✅ Active wallet set to: " << m_wallets[index].label << std::endl;
+            std::cout << "   Address: " << m_activeWallet << std::endl;
+            
+            saveWalletConfig();
+        } else if (index == -1) {
+            std::cout << "Operation cancelled." << std::endl;
+        } else {
+            std::cout << "❌ Invalid wallet number." << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "❌ Invalid input. Please enter a number." << std::endl;
+    }
+}
+
+void CLIManager::removeWalletAddress() {
+    if (m_wallets.empty()) {
+        std::cout << "❌ No wallet addresses found." << std::endl;
+        return;
+    }
+    
+    std::cout << "\n🗑️  Remove Wallet Address" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    
+    viewWalletAddresses();
+    
+    std::cout << "Enter wallet number to remove (0 to cancel): ";
+    std::string choice;
+    std::getline(std::cin, choice);
+    
+    try {
+        int index = std::stoi(choice) - 1;
+        if (index >= 0 && index < static_cast<int>(m_wallets.size())) {
+            std::cout << "Are you sure you want to remove wallet '" << m_wallets[index].label << "'? (y/N): ";
+            std::string confirm;
+            std::getline(std::cin, confirm);
+            
+            if (confirm == "y" || confirm == "Y" || confirm == "yes") {
+                bool wasActive = m_wallets[index].isActive;
+                m_wallets.erase(m_wallets.begin() + index);
+                
+                if (wasActive) {
+                    if (!m_wallets.empty()) {
+                        m_wallets[0].isActive = true;
+                        m_activeWallet = m_wallets[0].address;
+                        std::cout << "✅ Wallet removed. New active wallet: " << m_wallets[0].label << std::endl;
+                    } else {
+                        m_activeWallet.clear();
+                        std::cout << "✅ Wallet removed. No active wallet set." << std::endl;
+                    }
+                } else {
+                    std::cout << "✅ Wallet removed successfully." << std::endl;
+                }
+                
+                saveWalletConfig();
+            } else {
+                std::cout << "Operation cancelled." << std::endl;
+            }
+        } else if (index == -1) {
+            std::cout << "Operation cancelled." << std::endl;
+        } else {
+            std::cout << "❌ Invalid wallet number." << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "❌ Invalid input. Please enter a number." << std::endl;
+    }
+}
+
+void CLIManager::importWalletFromFile() {
+    std::cout << "\n📥 Import Wallets from File" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    std::cout << "Enter file path: ";
+    
+    std::string filepath;
+    std::getline(std::cin, filepath);
+    
+    // TODO: Implement file import
+    std::cout << "❌ File import not yet implemented." << std::endl;
+    std::cout << "You can manually add wallets using 'wallet add'." << std::endl;
+}
+
+void CLIManager::exportWalletToFile() {
+    std::cout << "\n📤 Export Wallets to File" << std::endl;
+    std::cout << "═══════════════════════════════════════════════════════════════" << std::endl;
+    
+    if (m_wallets.empty()) {
+        std::cout << "❌ No wallet addresses to export." << std::endl;
+        return;
+    }
+    
+    std::cout << "Enter file path: ";
+    std::string filepath;
+    std::getline(std::cin, filepath);
+    
+    // TODO: Implement file export
+    std::cout << "❌ File export not yet implemented." << std::endl;
+    std::cout << "Wallet addresses are stored in: " << m_walletConfigFile << std::endl;
+}
+
+bool CLIManager::validateWalletAddress(const std::string& address) {
+    // Basic Monero address validation
+    if (address.empty()) return false;
+    
+    // Check length
+    if (address.length() != 95 && address.length() != 106) {
+        return false;
+    }
+    
+    // Check prefix
+    if (address[0] != '4' && address[0] != '8' && address[0] != '9') {
+        return false;
+    }
+    
+    // Check if all characters are valid base58
+    for (char c : address) {
+        if (!((c >= '1' && c <= '9') || 
+              (c >= 'A' && c <= 'H') || 
+              (c >= 'J' && c <= 'N') || 
+              (c >= 'P' && c <= 'Z') || 
+              (c >= 'a' && c <= 'k') || 
+              (c >= 'm' && c <= 'z'))) {
+            return false;
+        }
+    }
+    
+    return true;
+}
+
+void CLIManager::saveWalletConfig() {
+    // TODO: Implement wallet config saving
+    // For now, just update the main config
+    if (!m_activeWallet.empty() && m_config) {
+        m_config->setValue("pool.username", m_activeWallet);
+    }
+}
+
+void CLIManager::loadWalletConfig() {
+    // TODO: Implement wallet config loading
+    // For now, load from main config
+    if (m_config) {
+        std::string wallet = m_config->getValue<std::string>("pool.username", "");
+        if (!wallet.empty() && validateWalletAddress(wallet)) {
+            WalletInfo info(wallet, "Default Wallet", "mainnet");
+            info.isActive = true;
+            m_wallets.push_back(info);
+            m_activeWallet = wallet;
+        }
+    }
+}
+
+std::string CLIManager::getCurrentDateTime() {
+    auto now = std::chrono::system_clock::now();
+    auto time_t = std::chrono::system_clock::to_time_t(now);
+    auto tm = *std::localtime(&time_t);
+    
+    std::ostringstream oss;
+    oss << std::put_time(&tm, "%Y-%m-%d %H:%M:%S");
+    return oss.str();
+}
+
+// Command-line wallet functions
+void CLIManager::addWalletFromCommandLine(const std::vector<std::string>& args) {
+    if (args.empty()) {
+        std::cout << "❌ Usage: wallet add <address> [label]" << std::endl;
+        return;
+    }
+    
+    std::string address = args[0];
+    std::string label = args.size() > 1 ? args[1] : "Wallet " + std::to_string(m_wallets.size() + 1);
+    
+    if (!validateWalletAddress(address)) {
+        std::cout << "❌ Invalid Monero wallet address format!" << std::endl;
+        return;
+    }
+    
+    // Determine wallet type
+    std::string type = "mainnet";
+    if (address[0] == '9') {
+        type = "testnet";
+    } else if (address.length() == 106) {
+        type = "integrated";
+    }
+    
+    // Add wallet
+    WalletInfo wallet(address, label, type);
+    wallet.addedDate = getCurrentDateTime();
+    
+    m_wallets.push_back(wallet);
+    
+    // If this is the first wallet, make it active
+    if (m_wallets.size() == 1) {
+        m_wallets[0].isActive = true;
+        m_activeWallet = address;
+        std::cout << "✅ Wallet added and set as active!" << std::endl;
+    } else {
+        std::cout << "✅ Wallet added successfully!" << std::endl;
+    }
+    
+    saveWalletConfig();
+}
+
+void CLIManager::setActiveWalletFromCommandLine(const std::string& indexStr) {
+    if (m_wallets.empty()) {
+        std::cout << "❌ No wallet addresses found." << std::endl;
+        return;
+    }
+    
+    try {
+        int index = std::stoi(indexStr) - 1;
+        if (index >= 0 && index < static_cast<int>(m_wallets.size())) {
+            // Deactivate all wallets
+            for (auto& wallet : m_wallets) {
+                wallet.isActive = false;
+            }
+            
+            // Activate selected wallet
+            m_wallets[index].isActive = true;
+            m_activeWallet = m_wallets[index].address;
+            
+            std::cout << "✅ Active wallet set to: " << m_wallets[index].label << std::endl;
+            std::cout << "   Address: " << m_activeWallet << std::endl;
+            
+            saveWalletConfig();
+        } else {
+            std::cout << "❌ Invalid wallet number. Use 'wallet list' to see available wallets." << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "❌ Invalid wallet number. Please enter a valid number." << std::endl;
+    }
+}
+
+void CLIManager::removeWalletFromCommandLine(const std::string& indexStr) {
+    if (m_wallets.empty()) {
+        std::cout << "❌ No wallet addresses found." << std::endl;
+        return;
+    }
+    
+    try {
+        int index = std::stoi(indexStr) - 1;
+        if (index >= 0 && index < static_cast<int>(m_wallets.size())) {
+            bool wasActive = m_wallets[index].isActive;
+            std::string walletLabel = m_wallets[index].label;
+            
+            m_wallets.erase(m_wallets.begin() + index);
+            
+            if (wasActive) {
+                if (!m_wallets.empty()) {
+                    m_wallets[0].isActive = true;
+                    m_activeWallet = m_wallets[0].address;
+                    std::cout << "✅ Wallet '" << walletLabel << "' removed. New active wallet: " << m_wallets[0].label << std::endl;
+                } else {
+                    m_activeWallet.clear();
+                    std::cout << "✅ Wallet '" << walletLabel << "' removed. No active wallet set." << std::endl;
+                }
+            } else {
+                std::cout << "✅ Wallet '" << walletLabel << "' removed successfully." << std::endl;
+            }
+            
+            saveWalletConfig();
+        } else {
+            std::cout << "❌ Invalid wallet number. Use 'wallet list' to see available wallets." << std::endl;
+        }
+    } catch (const std::exception& e) {
+        std::cout << "❌ Invalid wallet number. Please enter a valid number." << std::endl;
+    }
 }

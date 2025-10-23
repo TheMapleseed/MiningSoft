@@ -2,6 +2,7 @@
 
 #include "config_manager.h"
 #include "logger.h"
+#include "performance_monitor.h"
 #include <string>
 #include <vector>
 #include <thread>
@@ -76,6 +77,7 @@ private:
     // Utilities
     std::vector<uint8_t> hexToBytes(const std::string& hex);
     std::string bytesToHex(const uint8_t* bytes, size_t length);
+    bool isValidMoneroAddress(const std::string& address);
     
     // Configuration
     ConfigManager m_config;
@@ -102,4 +104,17 @@ private:
     
     // RandomX
     std::unique_ptr<RandomX> m_randomx;
+    
+    // Performance monitoring
+    std::unique_ptr<PerformanceMonitor> m_performanceMonitor;
+    
+    // Mining statistics
+    std::atomic<uint64_t> m_sharesSubmitted;
+    std::atomic<uint64_t> m_sharesAccepted;
+    std::atomic<uint64_t> m_sharesRejected;
+    std::atomic<uint32_t> m_submitId;
+    
+    // Methods
+    void processShareResponse(const std::string& response, uint32_t nonce);
+    void updatePerformanceStats();
 };

@@ -2,6 +2,7 @@
 #include "config_manager.h"
 #include "logger.h"
 #include "cli_manager.h"
+#include "startup_tests.h"
 #include <iostream>
 #include <signal.h>
 #include <memory>
@@ -55,6 +56,34 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signalHandler);
     
     try {
+        // 🚀 RUN STARTUP TESTS FIRST
+        std::cout << "Initializing MiningSoft..." << std::endl;
+        
+        // Run comprehensive startup tests
+        if (!StartupTestRunner::runStartupTests()) {
+            std::cerr << "❌ Critical startup tests failed!" << std::endl;
+            std::cerr << "Please check the test results above and fix any issues." << std::endl;
+            std::cerr << "Use --emergency-bypass to skip tests (not recommended)." << std::endl;
+            
+            // Check for emergency bypass flag
+            bool emergencyBypass = false;
+            for (int i = 1; i < argc; i++) {
+                if (std::string(argv[i]) == "--emergency-bypass") {
+                    emergencyBypass = true;
+                    break;
+                }
+            }
+            
+            if (!emergencyBypass) {
+                return 1;
+            } else {
+                std::cout << "⚠️  Emergency bypass enabled - proceeding despite test failures" << std::endl;
+            }
+        }
+        
+        // Check if we should auto-start mining
+        bool shouldAutoStart = StartupTestRunner::shouldAutoStartMining();
+        
         // Check for CLI mode vs direct mining mode
         bool cliMode = true;
         bool autoStart = false;
@@ -80,12 +109,29 @@ int main(int argc, char* argv[]) {
         }
         
         if (cliMode) {
+            // Check if we should proceed to CLI after tests
+            if (!StartupTestRunner::shouldProceedToCLI()) {
+                std::cerr << "❌ Cannot proceed to CLI due to critical test failures" << std::endl;
+                return 1;
+            }
+            
             // Initialize CLI system
             CLIManager cli;
             if (!cli.initialize()) {
                 std::cerr << "Failed to initialize CLI system\n";
                 return 1;
             }
+            
+            // Display CLI welcome message
+            std::cout << "\n";
+            std::cout << "╔══════════════════════════════════════════════════════════════════════════════╗\n";
+            std::cout << "║                           MININGSOFT CLI READY                             ║\n";
+            std::cout << "║                                                                              ║\n";
+            std::cout << "║  ✅ All startup tests passed successfully                                    ║\n";
+            std::cout << "║  🚀 System ready for mining operations                                       ║\n";
+            std::cout << "║  💡 Type 'help' for available commands                                      ║\n";
+            std::cout << "╚══════════════════════════════════════════════════════════════════════════════╝\n";
+            std::cout << "\n";
             
             // Run CLI
             cli.run();

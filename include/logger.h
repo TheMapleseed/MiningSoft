@@ -21,6 +21,22 @@ public:
         Error = 3,
         Critical = 4
     };
+    
+    enum class Category {
+        General,
+        Mining,
+        Network,
+        Wallet,
+        Performance,
+        Thermal,
+        Memory,
+        RandomX,
+        Pool,
+        CLI,
+        Config,
+        System,
+        Test
+    };
 
     Logger();
     ~Logger();
@@ -42,6 +58,22 @@ public:
     void warning(const std::string& message);
     void error(const std::string& message);
     void critical(const std::string& message);
+    
+    // Enhanced logging with categories
+    void log(Level level, Category category, const std::string& message);
+    void debug(Category category, const std::string& message);
+    void info(Category category, const std::string& message);
+    void warning(Category category, const std::string& message);
+    void error(Category category, const std::string& message);
+    void critical(Category category, const std::string& message);
+    
+    // Structured logging
+    void logEvent(const std::string& event, const std::string& details = "", 
+                  Level level = Level::Info, Category category = Category::General);
+    void logError(const std::string& error, const std::string& context = "", 
+                  Category category = Category::General);
+    void logPerformance(const std::string& metric, double value, 
+                       const std::string& unit = "", Category category = Category::Performance);
     
     // Logging with format string support
     template<typename... Args>
@@ -85,6 +117,9 @@ public:
     };
     
     LogStats getStats() const;
+    
+    // Helper function for category strings
+    std::string getCategoryString(Category category);
 
 private:
     // Internal log method

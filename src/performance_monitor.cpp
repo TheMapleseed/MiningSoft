@@ -1,394 +1,318 @@
 #include "performance_monitor.h"
 #include "logger.h"
-#include <algorithm>
-#include <numeric>
-#include <fstream>
+#include <iostream>
 #include <iomanip>
-#include <mutex>
-#include <thread>
-#include <chrono>
+#include <sstream>
+#include <algorithm>
+#include <cmath>
 
-PerformanceMonitor::PerformanceMonitor() : m_active(false), m_shouldStop(false) {
-    LOG_DEBUG("PerformanceMonitor constructor called");
+PerformanceMonitor::PerformanceMonitor() 
+    : m_currentHashRate(0.0), m_averageHashRate(0.0), m_peakHashRate(0.0),
+      m_totalHashes(0), m_sharesSubmitted(0), m_sharesAccepted(0), m_sharesRejected(0),
+      m_currentDifficulty(0.0), m_running(false), m_displayActive(false) {
+    m_startTime = std::chrono::steady_clock::now();
+    m_lastUpdate = m_startTime;
+    m_lastHashTime = m_startTime;
 }
 
 PerformanceMonitor::~PerformanceMonitor() {
-    stop();
-    LOG_DEBUG("PerformanceMonitor destructor called");
+    shutdown();
 }
 
 bool PerformanceMonitor::initialize() {
-    LOG_INFO("Initializing performance monitoring system");
+    if (m_running) {
+        return true;
+    }
     
-    m_startTime = std::chrono::steady_clock::now();
-    m_lastUpdate = m_startTime;
-    
-    LOG_INFO("Performance monitoring system initialized");
+    m_running = true;
+    LOG_INFO("Performance monitor initialized");
     return true;
 }
 
-void PerformanceMonitor::start() {
-    if (m_active) {
-        LOG_WARNING("Performance monitoring is already active");
+void PerformanceMonitor::shutdown() {
+    if (m_running) {
+        m_running = false;
+        stopRealTimeDisplay();
+        LOG_INFO("Performance monitor shutdown");
+    }
+}
+
+void PerformanceMonitor::updateHashRate(double hashRate) {
+    m_currentHashRate = hashRate;
+    m_lastHashTime = std::chrono::steady_clock::now();
+    
+    // Update peak hash rate
+    double current = m_currentHashRate.load();
+    double peak = m_peakHashRate.load();
+    if (current > peak) {
+        m_peakHashRate = current;
+    }
+    
+    // Update averages
+    updateAverages();
+}
+
+void PerformanceMonitor::updateShares(uint64_t submitted, uint64_t accepted, uint64_t rejected) {
+    m_sharesSubmitted = submitted;
+    m_sharesAccepted = accepted;
+    m_sharesRejected = rejected;
+    m_lastUpdate = std::chrono::steady_clock::now();
+}
+
+void PerformanceMonitor::updateJobInfo(const std::string& jobId, const std::string& pool, double difficulty) {
+    std::lock_guard<std::mutex> lock(m_statsMutex);
+    m_currentJob = jobId;
+    m_currentPool = pool;
+    m_currentDifficulty = difficulty;
+    m_lastUpdate = std::chrono::steady_clock::now();
+}
+
+double PerformanceMonitor::getCurrentHashRate() const {
+    return m_currentHashRate.load();
+}
+
+double PerformanceMonitor::getAverageHashRate() const {
+    return m_averageHashRate.load();
+}
+
+double PerformanceMonitor::getPeakHashRate() const {
+    return m_peakHashRate.load();
+}
+
+uint64_t PerformanceMonitor::getTotalHashes() const {
+    return m_totalHashes.load();
+}
+
+uint64_t PerformanceMonitor::getSharesSubmitted() const {
+    return m_sharesSubmitted.load();
+}
+
+uint64_t PerformanceMonitor::getSharesAccepted() const {
+    return m_sharesAccepted.load();
+}
+
+uint64_t PerformanceMonitor::getSharesRejected() const {
+    return m_sharesRejected.load();
+}
+
+double PerformanceMonitor::getAcceptanceRate() const {
+    uint64_t submitted = m_sharesSubmitted.load();
+    uint64_t accepted = m_sharesAccepted.load();
+    
+    if (submitted == 0) {
+        return 0.0;
+    }
+    
+    return (double)accepted / submitted * 100.0;
+}
+
+std::string PerformanceMonitor::getCurrentJob() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_statsMutex));
+    return m_currentJob;
+}
+
+std::string PerformanceMonitor::getCurrentPool() const {
+    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(m_statsMutex));
+    return m_currentPool;
+}
+
+double PerformanceMonitor::getCurrentDifficulty() const {
+    return m_currentDifficulty.load();
+}
+
+void PerformanceMonitor::displayStats() {
+    std::cout << "\n╔══════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║                    MININGSOFT PERFORMANCE                    ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+    
+    std::cout << "\n📊 HASH RATE:\n";
+    std::cout << "   Current: " << formatHashRate(getCurrentHashRate()) << "\n";
+    std::cout << "   Average: " << formatHashRate(getAverageHashRate()) << "\n";
+    std::cout << "   Peak:    " << formatHashRate(getPeakHashRate()) << "\n";
+    
+    std::cout << "\n⛏️  MINING STATISTICS:\n";
+    std::cout << "   Shares: " << getSharesSubmitted() << " submitted, " 
+              << getSharesAccepted() << " accepted, " 
+              << getSharesRejected() << " rejected\n";
+    std::cout << "   Rate:   " << formatPercentage(getAcceptanceRate()) << " acceptance\n";
+    
+    std::cout << "\n🌐 POOL INFO:\n";
+    std::cout << "   Pool:       " << getCurrentPool() << "\n";
+    std::cout << "   Job:        " << getCurrentJob() << "\n";
+    std::cout << "   Difficulty: " << std::fixed << std::setprecision(2) << getCurrentDifficulty() << "\n";
+    
+    auto now = std::chrono::steady_clock::now();
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - m_startTime);
+    std::cout << "\n⏱️  UPTIME: " << formatTime(uptime) << "\n";
+    
+    std::cout << "\n";
+}
+
+void PerformanceMonitor::startRealTimeDisplay() {
+    if (m_displayActive) {
         return;
     }
     
-    LOG_INFO("Starting performance monitoring");
-    
-    m_active = true;
-    m_shouldStop = false;
-    
-    // Start monitoring thread
-    m_monitoringThread = std::thread(&PerformanceMonitor::monitoringLoop, this);
-    
-    LOG_INFO("Performance monitoring started");
+    m_displayActive = true;
+    m_displayThread = std::thread(&PerformanceMonitor::displayLoop, this);
+    LOG_INFO("Real-time performance display started");
 }
 
-void PerformanceMonitor::stop() {
-    if (!m_active) {
-        return;
-    }
-    
-    LOG_INFO("Stopping performance monitoring");
-    
-    m_shouldStop = true;
-    m_active = false;
-    
-    // Wait for monitoring thread to finish
-    if (m_monitoringThread.joinable()) {
-        m_monitoringThread.join();
-    }
-    
-    LOG_INFO("Performance monitoring stopped");
-}
-
-void PerformanceMonitor::updateMiningMetrics(uint64_t hashes, double hashrate, double temperature) {
-    m_totalHashes = hashes;
-    m_currentHashrate = hashrate;
-    m_temperature = temperature;
-    
-    // Update average hashrate using C23 auto and constexpr
-    static auto totalHashrate = 0.0;
-    static auto sampleCount = 0;
-    
-    totalHashrate += hashrate;
-    sampleCount++;
-    m_averageHashrate = totalHashrate / sampleCount;
-    
-    // Update peak hashrate
-    if (hashrate > m_peakHashrate) {
-        m_peakHashrate = hashrate;
-    }
-}
-
-void PerformanceMonitor::updateSystemMetrics(double cpuUsage, double memoryUsage, double gpuUsage) {
-    m_cpuUsage = cpuUsage;
-    m_memoryUsage = memoryUsage;
-    m_gpuUsage = gpuUsage;
-}
-
-void PerformanceMonitor::recordShareSubmission(bool accepted, double difficulty) {
-    if (accepted) {
-        m_acceptedShares++;
-    } else {
-        m_rejectedShares++;
-    }
-}
-
-void PerformanceMonitor::recordThermalEvent(double temperature, bool throttling) {
-    m_temperature = temperature;
-    m_thermalThrottling = throttling;
-}
-
-PerformanceMonitor::PerformanceSummary PerformanceMonitor::getSummary() const {
-    PerformanceSummary summary;
-    
-    summary.currentHashrate = m_currentHashrate.load();
-    summary.averageHashrate = m_averageHashrate.load();
-    summary.peakHashrate = m_peakHashrate.load();
-    summary.totalHashes = m_totalHashes.load();
-    summary.acceptedShares = m_acceptedShares.load();
-    summary.rejectedShares = m_rejectedShares.load();
-    
-    if (summary.acceptedShares + summary.rejectedShares > 0) {
-        summary.shareAcceptanceRate = static_cast<double>(summary.acceptedShares) / 
-                                    (summary.acceptedShares + summary.rejectedShares);
-    } else {
-        summary.shareAcceptanceRate = 0.0;
-    }
-    
-    summary.cpuUsage = m_cpuUsage.load();
-    summary.memoryUsage = m_memoryUsage.load();
-    summary.gpuUsage = m_gpuUsage.load();
-    summary.temperature = m_temperature.load();
-    summary.thermalThrottling = m_thermalThrottling.load();
-    
-    summary.startTime = m_startTime;
-    summary.lastUpdate = m_lastUpdate;
-    
-    // Get recommendations
-    {
-        std::lock_guard<std::mutex> lock(m_recommendationsMutex);
-        summary.recommendations = m_recommendations;
-    }
-    
-    summary.efficiencyScore = m_efficiencyScore.load();
-    
-    return summary;
-}
-
-PerformanceMonitor::HistoricalData PerformanceMonitor::getHistoricalData(int maxPoints) const {
-    std::lock_guard<std::mutex> lock(m_historicalMutex);
-    
-    HistoricalData data;
-    int startIndex = std::max(0, static_cast<int>(m_hashrateHistory.size()) - maxPoints);
-    
-    data.hashrateHistory.assign(m_hashrateHistory.begin() + startIndex, m_hashrateHistory.end());
-    data.temperatureHistory.assign(m_temperatureHistory.begin() + startIndex, m_temperatureHistory.end());
-    data.cpuUsageHistory.assign(m_cpuUsageHistory.begin() + startIndex, m_cpuUsageHistory.end());
-    data.memoryUsageHistory.assign(m_memoryUsageHistory.begin() + startIndex, m_memoryUsageHistory.end());
-    data.timestamps.assign(m_timestamps.begin() + startIndex, m_timestamps.end());
-    
-    return data;
-}
-
-std::vector<std::string> PerformanceMonitor::getRecommendations() const {
-    std::lock_guard<std::mutex> lock(m_recommendationsMutex);
-    return m_recommendations;
-}
-
-bool PerformanceMonitor::exportToFile(const std::string& filename) const {
-    LOG_INFO("Exporting performance data to {}", filename);
-    
-    std::ofstream file(filename);
-    if (!file.is_open()) {
-        LOG_ERROR("Failed to open file for export: {}", filename);
-        return false;
-    }
-    
-    // Export as JSON
-    file << "{\n";
-    file << "  \"summary\": {\n";
-    
-    auto summary = getSummary();
-    file << "    \"currentHashrate\": " << summary.currentHashrate << ",\n";
-    file << "    \"averageHashrate\": " << summary.averageHashrate << ",\n";
-    file << "    \"peakHashrate\": " << summary.peakHashrate << ",\n";
-    file << "    \"totalHashes\": " << summary.totalHashes << ",\n";
-    file << "    \"acceptedShares\": " << summary.acceptedShares << ",\n";
-    file << "    \"rejectedShares\": " << summary.rejectedShares << ",\n";
-    file << "    \"shareAcceptanceRate\": " << summary.shareAcceptanceRate << ",\n";
-    file << "    \"cpuUsage\": " << summary.cpuUsage << ",\n";
-    file << "    \"memoryUsage\": " << summary.memoryUsage << ",\n";
-    file << "    \"gpuUsage\": " << summary.gpuUsage << ",\n";
-    file << "    \"temperature\": " << summary.temperature << ",\n";
-    file << "    \"thermalThrottling\": " << (summary.thermalThrottling ? "true" : "false") << ",\n";
-    file << "    \"efficiencyScore\": " << summary.efficiencyScore << "\n";
-    
-    file << "  },\n";
-    file << "  \"recommendations\": [\n";
-    
-    for (size_t i = 0; i < summary.recommendations.size(); i++) {
-        file << "    \"" << summary.recommendations[i] << "\"";
-        if (i < summary.recommendations.size() - 1) {
-            file << ",";
+void PerformanceMonitor::stopRealTimeDisplay() {
+    if (m_displayActive) {
+        m_displayActive = false;
+        if (m_displayThread.joinable()) {
+            m_displayThread.join();
         }
-        file << "\n";
+        LOG_INFO("Real-time performance display stopped");
     }
-    
-    file << "  ]\n";
-    file << "}\n";
-    
-    file.close();
-    
-    LOG_INFO("Performance data exported successfully to {}", filename);
-    return true;
 }
 
-void PerformanceMonitor::reset() {
-    LOG_INFO("Resetting performance metrics");
+std::string PerformanceMonitor::exportStats() const {
+    std::ostringstream json;
+    json << "{\n";
+    json << "  \"hashRate\": {\n";
+    json << "    \"current\": " << getCurrentHashRate() << ",\n";
+    json << "    \"average\": " << getAverageHashRate() << ",\n";
+    json << "    \"peak\": " << getPeakHashRate() << "\n";
+    json << "  },\n";
+    json << "  \"shares\": {\n";
+    json << "    \"submitted\": " << getSharesSubmitted() << ",\n";
+    json << "    \"accepted\": " << getSharesAccepted() << ",\n";
+    json << "    \"rejected\": " << getSharesRejected() << ",\n";
+    json << "    \"acceptanceRate\": " << getAcceptanceRate() << "\n";
+    json << "  },\n";
+    json << "  \"pool\": {\n";
+    json << "    \"name\": \"" << getCurrentPool() << "\",\n";
+    json << "    \"job\": \"" << getCurrentJob() << "\",\n";
+    json << "    \"difficulty\": " << getCurrentDifficulty() << "\n";
+    json << "  }\n";
+    json << "}\n";
     
+    return json.str();
+}
+
+void PerformanceMonitor::resetStats() {
+    m_currentHashRate = 0.0;
+    m_averageHashRate = 0.0;
+    m_peakHashRate = 0.0;
     m_totalHashes = 0;
-    m_currentHashrate = 0.0;
-    m_averageHashrate = 0.0;
-    m_peakHashrate = 0.0;
-    m_acceptedShares = 0;
-    m_rejectedShares = 0;
-    m_cpuUsage = 0.0;
-    m_memoryUsage = 0.0;
-    m_gpuUsage = 0.0;
-    m_temperature = 0.0;
-    m_thermalThrottling = false;
-    m_efficiencyScore = 0.0;
-    
-    {
-        std::lock_guard<std::mutex> lock(m_historicalMutex);
-        m_hashrateHistory.clear();
-        m_temperatureHistory.clear();
-        m_cpuUsageHistory.clear();
-        m_memoryUsageHistory.clear();
-        m_timestamps.clear();
-    }
-    
-    {
-        std::lock_guard<std::mutex> lock(m_recommendationsMutex);
-        m_recommendations.clear();
-    }
+    m_sharesSubmitted = 0;
+    m_sharesAccepted = 0;
+    m_sharesRejected = 0;
+    m_currentDifficulty = 0.0;
     
     m_startTime = std::chrono::steady_clock::now();
     m_lastUpdate = m_startTime;
+    m_lastHashTime = m_startTime;
+    
+    LOG_INFO("Performance statistics reset");
 }
 
-void PerformanceMonitor::monitoringLoop() {
-    LOG_INFO("Performance monitoring loop started");
-    
-    while (!m_shouldStop && m_active) {
-        try {
-            // Update historical data
-            {
-                std::lock_guard<std::mutex> lock(m_historicalMutex);
-                
-                m_hashrateHistory.push_back(m_currentHashrate.load());
-                m_temperatureHistory.push_back(m_temperature.load());
-                m_cpuUsageHistory.push_back(m_cpuUsage.load());
-                m_memoryUsageHistory.push_back(m_memoryUsage.load());
-                m_timestamps.push_back(std::chrono::steady_clock::now());
-                
-                // Clean up old data
-                cleanupHistoricalData();
-            }
-            
-            // Calculate insights and recommendations
-            calculateInsights();
-            
-            // Update efficiency score
-            updateEfficiencyScore();
-            
-            m_lastUpdate = std::chrono::steady_clock::now();
-            
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception in performance monitoring loop: {}", e.what());
-        }
+void PerformanceMonitor::displayLoop() {
+    while (m_displayActive && m_running) {
+        clearScreen();
+        displayHeader();
+        displayHashRate();
+        displayShares();
+        displayJobInfo();
+        displayFooter();
         
-        // Wait before next update
-        std::this_thread::sleep_for(m_monitoringInterval);
-    }
-    
-    LOG_INFO("Performance monitoring loop ended");
-}
-
-void PerformanceMonitor::calculateInsights() {
-    analyzeThermalPerformance();
-    analyzeMiningEfficiency();
-    generateRecommendations();
-}
-
-void PerformanceMonitor::analyzeThermalPerformance() {
-    double temp = m_temperature.load();
-    bool throttling = m_thermalThrottling.load();
-    
-    if (temp > TEMPERATURE_THRESHOLD) {
-        LOG_WARNING("High temperature detected: {:.1f}°C", temp);
-    }
-    
-    if (throttling) {
-        LOG_WARNING("Thermal throttling is active");
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
     }
 }
 
-void PerformanceMonitor::analyzeMiningEfficiency() {
-    double hashrate = m_currentHashrate.load();
-    double cpuUsage = m_cpuUsage.load();
-    double memoryUsage = m_memoryUsage.load();
+void PerformanceMonitor::updateAverages() {
+    auto now = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime);
     
-    // Analyze efficiency based on resource usage vs hashrate
-    if (cpuUsage > 90.0 && hashrate < 1000.0) {
-        LOG_WARNING("High CPU usage with low hashrate - possible inefficiency");
-    }
-    
-    if (memoryUsage > 80.0) {
-        LOG_WARNING("High memory usage: {:.1f}%", memoryUsage);
-    }
-}
-
-void PerformanceMonitor::generateRecommendations() {
-    std::lock_guard<std::mutex> lock(m_recommendationsMutex);
-    m_recommendations.clear();
-    
-    double hashrate = m_currentHashrate.load();
-    double cpuUsage = m_cpuUsage.load();
-    double memoryUsage = m_memoryUsage.load();
-    double temp = m_temperature.load();
-    bool throttling = m_thermalThrottling.load();
-    
-    if (temp > TEMPERATURE_THRESHOLD) {
-        m_recommendations.push_back("Consider improving cooling or reducing mining intensity");
-    }
-    
-    if (throttling) {
-        m_recommendations.push_back("Thermal throttling is active - check cooling system");
-    }
-    
-    if (cpuUsage > 90.0 && hashrate < 1000.0) {
-        m_recommendations.push_back("High CPU usage with low hashrate - consider optimizing mining parameters");
-    }
-    
-    if (memoryUsage > 80.0) {
-        m_recommendations.push_back("High memory usage - consider reducing memory footprint");
-    }
-    
-    if (hashrate < 500.0) {
-        m_recommendations.push_back("Low hashrate - check mining configuration and hardware");
-    }
-    
-    if (m_recommendations.empty()) {
-        m_recommendations.push_back("Performance is optimal");
-    }
-}
-
-void PerformanceMonitor::updateEfficiencyScore() {
-    double hashrate = m_currentHashrate.load();
-    double cpuUsage = m_cpuUsage.load();
-    double memoryUsage = m_memoryUsage.load();
-    double temp = m_temperature.load();
-    bool throttling = m_thermalThrottling.load();
-    
-    // Calculate efficiency score (0.0 to 1.0)
-    double score = 1.0;
-    
-    // Penalize for high temperature
-    if (temp > TEMPERATURE_THRESHOLD) {
-        score -= 0.3;
-    }
-    
-    // Penalize for throttling
-    if (throttling) {
-        score -= 0.2;
-    }
-    
-    // Penalize for high resource usage with low hashrate
-    if (cpuUsage > 90.0 && hashrate < 1000.0) {
-        score -= 0.2;
-    }
-    
-    if (memoryUsage > 80.0) {
-        score -= 0.1;
-    }
-    
-    // Ensure score is between 0.0 and 1.0
-    score = std::max(0.0, std::min(1.0, score));
-    
-    m_efficiencyScore = score;
-}
-
-void PerformanceMonitor::cleanupHistoricalData() {
-    if (m_hashrateHistory.size() > MAX_HISTORICAL_POINTS) {
-        int removeCount = m_hashrateHistory.size() - MAX_HISTORICAL_POINTS;
+    if (duration.count() > 0) {
+        // Simple moving average
+        double current = m_currentHashRate.load();
+        double average = m_averageHashRate.load();
         
-        m_hashrateHistory.erase(m_hashrateHistory.begin(), m_hashrateHistory.begin() + removeCount);
-        m_temperatureHistory.erase(m_temperatureHistory.begin(), m_temperatureHistory.begin() + removeCount);
-        m_cpuUsageHistory.erase(m_cpuUsageHistory.begin(), m_cpuUsageHistory.begin() + removeCount);
-        m_memoryUsageHistory.erase(m_memoryUsageHistory.begin(), m_memoryUsageHistory.begin() + removeCount);
-        m_timestamps.erase(m_timestamps.begin(), m_timestamps.begin() + removeCount);
+        // Weighted average (70% old, 30% new)
+        double newAverage = (average * 0.7) + (current * 0.3);
+        m_averageHashRate = newAverage;
     }
+}
+
+void PerformanceMonitor::clearScreen() {
+    std::cout << "\033[2J\033[H";
+}
+
+void PerformanceMonitor::displayHeader() {
+    std::cout << "╔══════════════════════════════════════════════════════════════╗\n";
+    std::cout << "║                    MININGSOFT v1.0.0                        ║\n";
+    std::cout << "║              Real-Time Performance Monitor                  ║\n";
+    std::cout << "╚══════════════════════════════════════════════════════════════╝\n";
+}
+
+void PerformanceMonitor::displayHashRate() {
+    std::cout << "\n📊 HASH RATE\n";
+    std::cout << "┌─────────────────────────────────────────────────────────────┐\n";
+    std::cout << "│ Current: " << std::setw(12) << formatHashRate(getCurrentHashRate()) 
+              << " │ Average: " << std::setw(12) << formatHashRate(getAverageHashRate())
+              << " │ Peak: " << std::setw(12) << formatHashRate(getPeakHashRate()) << " │\n";
+    std::cout << "└─────────────────────────────────────────────────────────────┘\n";
+}
+
+void PerformanceMonitor::displayShares() {
+    std::cout << "\n⛏️  MINING STATISTICS\n";
+    std::cout << "┌─────────────────────────────────────────────────────────────┐\n";
+    std::cout << "│ Shares: " << std::setw(6) << getSharesSubmitted() 
+              << " submitted │ " << std::setw(6) << getSharesAccepted() 
+              << " accepted │ " << std::setw(6) << getSharesRejected() << " rejected │\n";
+    std::cout << "│ Rate: " << std::setw(8) << formatPercentage(getAcceptanceRate())
+              << " acceptance rate │\n";
+    std::cout << "└─────────────────────────────────────────────────────────────┘\n";
+}
+
+void PerformanceMonitor::displayJobInfo() {
+    std::cout << "\n🌐 POOL INFORMATION\n";
+    std::cout << "┌─────────────────────────────────────────────────────────────┐\n";
+    std::cout << "│ Pool: " << std::setw(20) << getCurrentPool()
+              << " │ Difficulty: " << std::setw(8) << std::fixed << std::setprecision(2) 
+              << getCurrentDifficulty() << " │\n";
+    std::cout << "│ Job: " << std::setw(25) << getCurrentJob() << " │\n";
+    std::cout << "└─────────────────────────────────────────────────────────────┘\n";
+}
+
+void PerformanceMonitor::displayFooter() {
+    auto now = std::chrono::steady_clock::now();
+    auto uptime = std::chrono::duration_cast<std::chrono::seconds>(now - m_startTime);
+    
+    std::cout << "\n⏱️  UPTIME: " << formatTime(uptime) << "\n";
+    std::cout << "🔄 Press Ctrl+C to stop mining\n";
+}
+
+std::string PerformanceMonitor::formatHashRate(double rate) const {
+    const char* units[] = {"H/s", "KH/s", "MH/s", "GH/s", "TH/s"};
+    int unit = 0;
+    double value = rate;
+    
+    while (value >= 1000.0 && unit < 4) {
+        value /= 1000.0;
+        unit++;
+    }
+    
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(2) << value << " " << units[unit];
+    return oss.str();
+}
+
+std::string PerformanceMonitor::formatTime(std::chrono::seconds duration) const {
+    auto hours = std::chrono::duration_cast<std::chrono::hours>(duration);
+    auto minutes = std::chrono::duration_cast<std::chrono::minutes>(duration - hours);
+    auto seconds = duration - hours - minutes;
+    
+    std::ostringstream oss;
+    oss << hours.count() << "h " << minutes.count() << "m " << seconds.count() << "s";
+    return oss.str();
+}
+
+std::string PerformanceMonitor::formatPercentage(double percentage) const {
+    std::ostringstream oss;
+    oss << std::fixed << std::setprecision(1) << percentage << "%";
+    return oss.str();
 }

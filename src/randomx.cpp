@@ -8,431 +8,815 @@
 #include <algorithm>
 #include <sstream>
 #include <iomanip>
+#include <thread>
+#include <chrono>
+#include <cmath>
 
-// RandomX constants
-constexpr size_t RANDOMX_CACHE_SIZE = 2097152; // 2MB
-constexpr size_t RANDOMX_DATASET_SIZE = 1073741824; // 1GB
-constexpr size_t RANDOMX_PROGRAM_SIZE = 256;
-constexpr size_t RANDOMX_PROGRAM_COUNT = 8;
-constexpr size_t RANDOMX_SCRATCHPAD_SIZE = 2097152; // 2MB
-
-// Blake2b implementation (simplified)
-class Blake2b {
-private:
-    uint64_t h[8];
-    uint8_t buffer[128];
-    size_t bufferLength;
-    uint64_t counter;
-    
-public:
-    Blake2b() {
-        reset();
-    }
-    
-    void reset() {
-        // Blake2b IV
-        h[0] = 0x6a09e667f3bcc908ULL;
-        h[1] = 0xbb67ae8584caa73bULL;
-        h[2] = 0x3c6ef372fe94f82bULL;
-        h[3] = 0xa54ff53a5f1d36f1ULL;
-        h[4] = 0x510e527fade682d1ULL;
-        h[5] = 0x9b05688c2b3e6c1fULL;
-        h[6] = 0x1f83d9abfb41bd6bULL;
-        h[7] = 0x5be0cd19137e2179ULL;
-        
-        bufferLength = 0;
-        counter = 0;
-    }
-    
-    void update(const uint8_t* data, size_t length) {
-        while (length > 0) {
-            size_t toCopy = std::min(length, 128 - bufferLength);
-            std::memcpy(buffer + bufferLength, data, toCopy);
-            bufferLength += toCopy;
-            data += toCopy;
-            length -= toCopy;
-            
-            if (bufferLength == 128) {
-                processBlock();
-                bufferLength = 0;
-            }
-        }
-    }
-    
-    void finalize(uint8_t* output) {
-        // Pad the buffer
-        std::memset(buffer + bufferLength, 0, 128 - bufferLength);
-        buffer[bufferLength] = 0x80;
-        
-        // Add counter
-        uint64_t* counterPtr = reinterpret_cast<uint64_t*>(buffer + 120);
-        *counterPtr = counter + bufferLength;
-        
-        processBlock();
-        
-        // Output the hash
-        for (int i = 0; i < 8; i++) {
-            uint64_t val = h[i];
-            for (int j = 0; j < 8; j++) {
-                output[i * 8 + j] = (val >> (j * 8)) & 0xFF;
-            }
-        }
-    }
-    
-private:
-    void processBlock() {
-        uint64_t v[16];
-        uint64_t m[16];
-        
-        // Initialize v
-        for (int i = 0; i < 8; i++) {
-            v[i] = h[i];
-        }
-        v[8] = 0x6a09e667f3bcc908ULL ^ 0x01010040ULL;
-        v[9] = 0xbb67ae8584caa73bULL;
-        v[10] = 0x3c6ef372fe94f82bULL;
-        v[11] = 0xa54ff53a5f1d36f1ULL;
-        v[12] = 0x510e527fade682d1ULL ^ counter;
-        v[13] = 0x9b05688c2b3e6c1fULL;
-        v[14] = 0x1f83d9abfb41bd6bULL;
-        v[15] = 0x5be0cd19137e2179ULL;
-        
-        // Load message
-        for (int i = 0; i < 16; i++) {
-            m[i] = *reinterpret_cast<const uint64_t*>(buffer + i * 8);
-        }
-        
-        // Blake2b rounds (simplified - just 12 rounds)
-        for (int round = 0; round < 12; round++) {
-            // Column rounds
-            for (int i = 0; i < 4; i++) {
-                v[i] = v[i] + v[4 + i] + m[0 + i];
-                v[12 + i] = rotateRight64(v[12 + i] ^ v[i], 32);
-                v[8 + i] = v[8 + i] + v[12 + i];
-                v[4 + i] = rotateRight64(v[4 + i] ^ v[8 + i], 24);
-                v[i] = v[i] + v[4 + i] + m[4 + i];
-                v[12 + i] = rotateRight64(v[12 + i] ^ v[i], 16);
-                v[8 + i] = v[8 + i] + v[12 + i];
-                v[4 + i] = rotateRight64(v[4 + i] ^ v[8 + i], 63);
-            }
-            
-            // Diagonal rounds
-            for (int i = 0; i < 4; i++) {
-                v[i] = v[i] + v[4 + i] + m[8 + i];
-                v[12 + i] = rotateRight64(v[12 + i] ^ v[i], 32);
-                v[8 + i] = v[8 + i] + v[12 + i];
-                v[4 + i] = rotateRight64(v[4 + i] ^ v[8 + i], 24);
-                v[i] = v[i] + v[4 + i] + m[12 + i];
-                v[12 + i] = rotateRight64(v[12 + i] ^ v[i], 16);
-                v[8 + i] = v[8 + i] + v[12 + i];
-                v[4 + i] = rotateRight64(v[4 + i] ^ v[8 + i], 63);
-            }
-        }
-        
-        // Update hash
-        for (int i = 0; i < 8; i++) {
-            h[i] ^= v[i] ^ v[8 + i];
-        }
-        
-        counter++;
-    }
-    
-    uint64_t rotateRight64(uint64_t x, int n) {
-        return (x >> n) | (x << (64 - n));
-    }
-};
-
-// RandomX VM implementation
-class RandomXVM {
-private:
-    std::array<uint64_t, 8> registers;
-    std::array<uint64_t, 8> scratchpad;
-    std::vector<uint8_t> program;
-    std::mt19937_64 rng;
-    
-public:
-    RandomXVM() : rng(std::random_device{}()) {
-        reset();
-    }
-    
-    void reset() {
-        registers.fill(0);
-        scratchpad.fill(0);
-        program.clear();
-    }
-    
-    void loadProgram(const uint8_t* seed, size_t seedSize) {
-        program.clear();
-        program.reserve(RANDOMX_PROGRAM_SIZE);
-        
-        // Generate program from seed using simplified algorithm
-        Blake2b hasher;
-        hasher.update(seed, seedSize);
-        
-        for (size_t i = 0; i < RANDOMX_PROGRAM_SIZE; i++) {
-            uint8_t hash[32];
-            hasher.finalize(hash);
-            program.push_back(hash[i % 32]);
-            hasher.reset();
-            hasher.update(hash, 32);
-        }
-    }
-    
-    void execute() {
-        // Simplified RandomX program execution
-        for (size_t i = 0; i < program.size(); i += 4) {
-            uint32_t instruction = *reinterpret_cast<const uint32_t*>(&program[i]);
-            
-            // Decode instruction (simplified)
-            uint8_t opcode = instruction & 0xFF;
-            uint8_t dst = (instruction >> 8) & 0x7;
-            uint8_t src1 = (instruction >> 11) & 0x7;
-            uint8_t src2 = (instruction >> 14) & 0x7;
-            
-            switch (opcode & 0x0F) {
-                case 0: // ADD
-                    registers[dst] = registers[src1] + registers[src2];
-                    break;
-                case 1: // SUB
-                    registers[dst] = registers[src1] - registers[src2];
-                    break;
-                case 2: // MUL
-                    registers[dst] = registers[src1] * registers[src2];
-                    break;
-                case 3: // XOR
-                    registers[dst] = registers[src1] ^ registers[src2];
-                    break;
-                case 4: // ROR
-                    registers[dst] = rotateRight64(registers[src1], registers[src2] & 63);
-                    break;
-                case 5: // ROL
-                    registers[dst] = rotateLeft64(registers[src1], registers[src2] & 63);
-                    break;
-                case 6: // AND
-                    registers[dst] = registers[src1] & registers[src2];
-                    break;
-                case 7: // OR
-                    registers[dst] = registers[src1] | registers[src2];
-                    break;
-                case 8: // NOT
-                    registers[dst] = ~registers[src1];
-                    break;
-                case 9: // NEG
-                    registers[dst] = -registers[src1];
-                    break;
-                case 10: // SHR
-                    registers[dst] = registers[src1] >> (registers[src2] & 63);
-                    break;
-                case 11: // SHL
-                    registers[dst] = registers[src1] << (registers[src2] & 63);
-                    break;
-                case 12: // CMP
-                    registers[dst] = (registers[src1] == registers[src2]) ? 1 : 0;
-                    break;
-                case 13: // LOAD
-                    registers[dst] = scratchpad[src1 % scratchpad.size()];
-                    break;
-                case 14: // STORE
-                    scratchpad[src1 % scratchpad.size()] = registers[dst];
-                    break;
-                case 15: // RANDOM
-                    registers[dst] = rng();
-                    break;
-            }
-        }
-    }
-    
-    uint64_t getRegister(int index) const {
-        return registers[index % 8];
-    }
-    
-    void setRegister(int index, uint64_t value) {
-        registers[index % 8] = value;
-    }
-    
-private:
-    uint64_t rotateRight64(uint64_t x, int n) {
-        return (x >> n) | (x << (64 - n));
-    }
-    
-    uint64_t rotateLeft64(uint64_t x, int n) {
-        return (x << n) | (x >> (64 - n));
-    }
-};
-
-// RandomXVM implementation
-RandomX::RandomXVM::RandomXVM() : rng(std::random_device{}()) {
-    reset();
+// RandomXCache Implementation
+RandomXCache::RandomXCache() : m_cache(nullptr), m_dataset(nullptr), m_initialized(false) {
 }
 
-void RandomX::RandomXVM::reset() {
-    registers.fill(0);
-    scratchpad.fill(0);
-    program.clear();
+RandomXCache::~RandomXCache() {
+    destroy();
 }
 
-void RandomX::RandomXVM::loadProgram(const uint8_t* seed, size_t seedSize) {
-    program.clear();
-    program.reserve(256);
-    
-    // Generate program from seed using simplified algorithm
-    Blake2b hasher;
-    hasher.update(seed, seedSize);
-    
-    for (size_t i = 0; i < 256; i++) {
-        uint8_t hash[32];
-        hasher.finalize(hash);
-        program.push_back(hash[i % 32]);
-        hasher.reset();
-        hasher.update(hash, 32);
+bool RandomXCache::initialize(const uint8_t* key, size_t keySize) {
+    if (m_initialized) {
+        return true;
     }
-}
-
-void RandomX::RandomXVM::execute() {
-    // Simplified RandomX program execution
-    for (size_t i = 0; i < program.size(); i += 4) {
-        uint32_t instruction = *reinterpret_cast<const uint32_t*>(&program[i]);
-        
-        // Decode instruction (simplified)
-        uint8_t opcode = instruction & 0xFF;
-        uint8_t dst = (instruction >> 8) & 0x7;
-        uint8_t src1 = (instruction >> 11) & 0x7;
-        uint8_t src2 = (instruction >> 14) & 0x7;
-        
-        switch (opcode & 0x0F) {
-            case 0: // ADD
-                registers[dst] = registers[src1] + registers[src2];
-                break;
-            case 1: // SUB
-                registers[dst] = registers[src1] - registers[src2];
-                break;
-            case 2: // MUL
-                registers[dst] = registers[src1] * registers[src2];
-                break;
-            case 3: // XOR
-                registers[dst] = registers[src1] ^ registers[src2];
-                break;
-            case 4: // ROR
-                registers[dst] = rotateRight64(registers[src1], registers[src2] & 63);
-                break;
-            case 5: // ROL
-                registers[dst] = rotateLeft64(registers[src1], registers[src2] & 63);
-                break;
-            case 6: // AND
-                registers[dst] = registers[src1] & registers[src2];
-                break;
-            case 7: // OR
-                registers[dst] = registers[src1] | registers[src2];
-                break;
-            case 8: // NOT
-                registers[dst] = ~registers[src1];
-                break;
-            case 9: // NEG
-                registers[dst] = -registers[src1];
-                break;
-            case 10: // SHR
-                registers[dst] = registers[src1] >> (registers[src2] & 63);
-                break;
-            case 11: // SHL
-                registers[dst] = registers[src1] << (registers[src2] & 63);
-                break;
-            case 12: // CMP
-                registers[dst] = (registers[src1] == registers[src2]) ? 1 : 0;
-                break;
-            case 13: // LOAD
-                registers[dst] = scratchpad[src1 % scratchpad.size()];
-                break;
-            case 14: // STORE
-                scratchpad[src1 % scratchpad.size()] = registers[dst];
-                break;
-            case 15: // RANDOM
-                registers[dst] = rng();
-                break;
-        }
+    
+    // Allocate cache memory
+    m_cache = std::aligned_alloc(64, RANDOMX_CACHE_SIZE);
+    if (!m_cache) {
+        return false;
     }
-}
-
-uint64_t RandomX::RandomXVM::getRegister(int index) const {
-    return registers[index % 8];
-}
-
-void RandomX::RandomXVM::setRegister(int index, uint64_t value) {
-    registers[index % 8] = value;
-}
-
-uint64_t RandomX::RandomXVM::rotateRight64(uint64_t x, int n) {
-    return (x >> n) | (x << (64 - n));
-}
-
-uint64_t RandomX::RandomXVM::rotateLeft64(uint64_t x, int n) {
-    return (x << n) | (x >> (64 - n));
-}
-
-// RandomX implementation
-RandomX::RandomX() : m_vm(std::make_unique<RandomXVM>()) {
-    LOG_DEBUG("RandomX initialized");
-}
-
-RandomX::~RandomX() = default;
-
-bool RandomX::initialize() {
-    LOG_INFO("Initializing RandomX algorithm");
+    
+    // Allocate dataset memory
+    m_dataset = std::aligned_alloc(64, RANDOMX_DATASET_SIZE);
+    if (!m_dataset) {
+        std::free(m_cache);
+        m_cache = nullptr;
+        return false;
+    }
+    
+    generateCache(key, keySize);
+    generateDataset();
+    
+    m_initialized = true;
     return true;
 }
 
-void RandomX::calculateHash(const uint8_t* input, size_t inputSize, uint8_t* output) {
-    // Initialize VM with input as seed
-    m_vm->reset();
-    m_vm->loadProgram(input, inputSize);
-    
-    // Execute program
-    m_vm->execute();
-    
-    // Generate hash from final register state
-    Blake2b hasher;
-    for (int i = 0; i < 8; i++) {
-        uint64_t reg = m_vm->getRegister(i);
-        hasher.update(reinterpret_cast<const uint8_t*>(&reg), sizeof(reg));
+void RandomXCache::destroy() {
+    if (m_cache) {
+        std::free(m_cache);
+        m_cache = nullptr;
+    }
+    if (m_dataset) {
+        std::free(m_dataset);
+        m_dataset = nullptr;
+    }
+    m_initialized = false;
+}
+
+const RandomXDatasetItem* RandomXCache::getDatasetItem(uint32_t index) const {
+    if (!m_initialized || !m_dataset) {
+        return nullptr;
     }
     
-    hasher.finalize(output);
+    size_t offset = (index % (RANDOMX_DATASET_SIZE / sizeof(RandomXDatasetItem))) * sizeof(RandomXDatasetItem);
+    return reinterpret_cast<RandomXDatasetItem*>(static_cast<uint8_t*>(m_dataset) + offset);
+}
+
+void RandomXCache::generateCache(const uint8_t* key, size_t keySize) {
+    // Simplified cache generation
+    // In a real implementation, this would use the full RandomX cache generation algorithm
+    uint8_t* cacheBytes = static_cast<uint8_t*>(m_cache);
+    for (size_t i = 0; i < RANDOMX_CACHE_SIZE; i += 32) {
+        // Generate deterministic data based on key
+        uint64_t seed = 0;
+        for (size_t j = 0; j < keySize; j++) {
+            seed ^= key[j] << ((j % 8) * 8);
+        }
+        seed ^= i;
+        
+        // Simple hash function
+        uint64_t hash = seed;
+        for (int k = 0; k < 4; k++) {
+            hash = hash * 0x9e3779b97f4a7c15ULL;
+            hash ^= hash >> 33;
+        }
+        
+        // Store hash in cache
+        for (int k = 0; k < 4; k++) {
+            *reinterpret_cast<uint64_t*>(cacheBytes + i + k * 8) = hash;
+            hash = hash * 0x9e3779b97f4a7c15ULL;
+        }
+    }
+}
+
+void RandomXCache::generateDataset() {
+    // Simplified dataset generation
+    uint8_t* datasetBytes = static_cast<uint8_t*>(m_dataset);
+    uint8_t* cacheBytes = static_cast<uint8_t*>(m_cache);
+    
+    for (size_t i = 0; i < RANDOMX_DATASET_SIZE; i += 64) {
+        uint32_t cacheIndex = (i / 64) % (RANDOMX_CACHE_SIZE / 64);
+        std::memcpy(datasetBytes + i, cacheBytes + cacheIndex * 64, 64);
+    }
+}
+
+// RandomXVM Implementation
+RandomXVM::RandomXVM() 
+    : m_programCounter(0), m_instructionCount(0), m_cycleCount(0), 
+      m_branchRegister(0), m_branchTarget(0), m_cache(nullptr), 
+      m_lightMode(false), m_initialized(false) {
+    reset();
+}
+
+RandomXVM::~RandomXVM() {
+    destroy();
+}
+
+bool RandomXVM::initialize(RandomXCache* cache, bool lightMode) {
+    if (m_initialized) {
+        return true;
+    }
+    
+    m_cache = cache;
+    m_lightMode = lightMode;
+    m_initialized = true;
+    
+    return true;
+}
+
+void RandomXVM::destroy() {
+    m_initialized = false;
+    m_cache = nullptr;
+}
+
+void RandomXVM::reset() {
+    std::fill(m_registers.begin(), m_registers.end(), 0);
+    std::fill(m_fregisters.begin(), m_fregisters.end(), 0.0);
+    std::fill(m_scratchpad.begin(), m_scratchpad.end(), 0);
+    std::fill(m_program.begin(), m_program.end(), RandomXInstruction{});
+    
+    m_programCounter = 0;
+    m_instructionCount = 0;
+    m_cycleCount = 0;
+    m_branchRegister = 0;
+    m_branchTarget = 0;
+}
+
+void RandomXVM::loadProgram(const uint8_t* seed, size_t seedSize) {
+    generateProgram(seed, seedSize);
+}
+
+void RandomXVM::execute() {
+    if (!m_initialized) {
+        return;
+    }
+    
+    for (int i = 0; i < RANDOMX_PROGRAM_SIZE; i++) {
+        executeInstruction(m_program[i]);
+        m_instructionCount++;
+        m_cycleCount++;
+    }
+}
+
+uint64_t RandomXVM::getRegister(int index) const {
+    if (index >= 0 && index < 8) {
+        return m_registers[index];
+    }
+    return 0;
+}
+
+void RandomXVM::setRegister(int index, uint64_t value) {
+    if (index >= 0 && index < 8) {
+        m_registers[index] = value;
+    }
+}
+
+uint64_t RandomXVM::getScratchpad(int index) const {
+    if (index >= 0 && index < 8) {
+        return m_scratchpad[index];
+    }
+    return 0;
+}
+
+void RandomXVM::setScratchpad(int index, uint64_t value) {
+    if (index >= 0 && index < 8) {
+        m_scratchpad[index] = value;
+    }
+}
+
+const RandomXInstruction& RandomXVM::getInstruction(int index) const {
+    if (index >= 0 && index < RANDOMX_PROGRAM_SIZE) {
+        return m_program[index];
+    }
+    static RandomXInstruction empty = {};
+    return empty;
+}
+
+void RandomXVM::setInstruction(int index, const RandomXInstruction& instruction) {
+    if (index >= 0 && index < RANDOMX_PROGRAM_SIZE) {
+        m_program[index] = instruction;
+    }
+}
+
+void RandomXVM::executeInstruction(const RandomXInstruction& instruction) {
+    switch (instruction.type) {
+        case RandomXInstructionType::IADD_RS:
+            executeIADD_RS(instruction);
+            break;
+        case RandomXInstructionType::IADD_M:
+            executeIADD_M(instruction);
+            break;
+        case RandomXInstructionType::ISUB_R:
+            executeISUB_R(instruction);
+            break;
+        case RandomXInstructionType::ISUB_M:
+            executeISUB_M(instruction);
+            break;
+        case RandomXInstructionType::IMUL_R:
+            executeIMUL_R(instruction);
+            break;
+        case RandomXInstructionType::IMUL_M:
+            executeIMUL_M(instruction);
+            break;
+        case RandomXInstructionType::IMULH_R:
+            executeIMULH_R(instruction);
+            break;
+        case RandomXInstructionType::IMULH_M:
+            executeIMULH_M(instruction);
+            break;
+        case RandomXInstructionType::ISMULH_R:
+            executeISMULH_R(instruction);
+            break;
+        case RandomXInstructionType::ISMULH_M:
+            executeISMULH_M(instruction);
+            break;
+        case RandomXInstructionType::IMUL_RCP:
+            executeIMUL_RCP(instruction);
+            break;
+        case RandomXInstructionType::INEG_R:
+            executeINEG_R(instruction);
+            break;
+        case RandomXInstructionType::IXOR_R:
+            executeIXOR_R(instruction);
+            break;
+        case RandomXInstructionType::IXOR_M:
+            executeIXOR_M(instruction);
+            break;
+        case RandomXInstructionType::IROR_R:
+            executeIROR_R(instruction);
+            break;
+        case RandomXInstructionType::IROL_R:
+            executeIROL_R(instruction);
+            break;
+        case RandomXInstructionType::ISWAP_R:
+            executeISWAP_R(instruction);
+            break;
+        case RandomXInstructionType::FSWAP_R:
+            executeFSWAP_R(instruction);
+            break;
+        case RandomXInstructionType::FADD_R:
+            executeFADD_R(instruction);
+            break;
+        case RandomXInstructionType::FADD_M:
+            executeFADD_M(instruction);
+            break;
+        case RandomXInstructionType::FSUB_R:
+            executeFSUB_R(instruction);
+            break;
+        case RandomXInstructionType::FSUB_M:
+            executeFSUB_M(instruction);
+            break;
+        case RandomXInstructionType::FSCAL_R:
+            executeFSCAL_R(instruction);
+            break;
+        case RandomXInstructionType::FMUL_R:
+            executeFMUL_R(instruction);
+            break;
+        case RandomXInstructionType::FDIV_M:
+            executeFDIV_M(instruction);
+            break;
+        case RandomXInstructionType::FSQRT_R:
+            executeFSQRT_R(instruction);
+            break;
+        case RandomXInstructionType::CBRANCH:
+            executeCBRANCH(instruction);
+            break;
+        case RandomXInstructionType::CFROUND:
+            executeCFROUND(instruction);
+            break;
+        case RandomXInstructionType::ISTORE:
+            executeISTORE(instruction);
+            break;
+        case RandomXInstructionType::NOP:
+            executeNOP(instruction);
+            break;
+    }
+}
+
+// Instruction implementations
+void RandomXVM::executeIADD_RS(const RandomXInstruction& instruction) {
+    uint64_t src = m_registers[instruction.src];
+    uint64_t dst = m_registers[instruction.dst];
+    m_registers[instruction.dst] = dst + (src << instruction.modShift);
+}
+
+void RandomXVM::executeIADD_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_registers[instruction.dst] += value;
+}
+
+void RandomXVM::executeISUB_R(const RandomXInstruction& instruction) {
+    m_registers[instruction.dst] -= m_registers[instruction.src];
+}
+
+void RandomXVM::executeISUB_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_registers[instruction.dst] -= value;
+}
+
+void RandomXVM::executeIMUL_R(const RandomXInstruction& instruction) {
+    m_registers[instruction.dst] *= m_registers[instruction.src];
+}
+
+void RandomXVM::executeIMUL_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_registers[instruction.dst] *= value;
+}
+
+void RandomXVM::executeIMULH_R(const RandomXInstruction& instruction) {
+    m_registers[instruction.dst] = mulh(m_registers[instruction.dst], m_registers[instruction.src]);
+}
+
+void RandomXVM::executeIMULH_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_registers[instruction.dst] = mulh(m_registers[instruction.dst], value);
+}
+
+void RandomXVM::executeISMULH_R(const RandomXInstruction& instruction) {
+    m_registers[instruction.dst] = smulh(static_cast<int64_t>(m_registers[instruction.dst]), 
+                                        static_cast<int64_t>(m_registers[instruction.src]));
+}
+
+void RandomXVM::executeISMULH_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_registers[instruction.dst] = smulh(static_cast<int64_t>(m_registers[instruction.dst]), 
+                                        static_cast<int64_t>(value));
+}
+
+void RandomXVM::executeIMUL_RCP(const RandomXInstruction& instruction) {
+    if (instruction.imm32 != 0) {
+        m_registers[instruction.dst] = (0xFFFFFFFFFFFFFFFFULL / instruction.imm32) * m_registers[instruction.dst];
+    }
+}
+
+void RandomXVM::executeINEG_R(const RandomXInstruction& instruction) {
+    m_registers[instruction.dst] = -m_registers[instruction.dst];
+}
+
+void RandomXVM::executeIXOR_R(const RandomXInstruction& instruction) {
+    m_registers[instruction.dst] ^= m_registers[instruction.src];
+}
+
+void RandomXVM::executeIXOR_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_registers[instruction.dst] ^= value;
+}
+
+void RandomXVM::executeIROR_R(const RandomXInstruction& instruction) {
+    uint64_t shift = m_registers[instruction.src] & 63;
+    m_registers[instruction.dst] = rotateRight64(m_registers[instruction.dst], shift);
+}
+
+void RandomXVM::executeIROL_R(const RandomXInstruction& instruction) {
+    uint64_t shift = m_registers[instruction.src] & 63;
+    m_registers[instruction.dst] = rotateLeft64(m_registers[instruction.dst], shift);
+}
+
+void RandomXVM::executeISWAP_R(const RandomXInstruction& instruction) {
+    std::swap(m_registers[instruction.dst], m_registers[instruction.src]);
+}
+
+void RandomXVM::executeFSWAP_R(const RandomXInstruction& instruction) {
+    std::swap(m_fregisters[instruction.dst], m_fregisters[instruction.src]);
+}
+
+void RandomXVM::executeFADD_R(const RandomXInstruction& instruction) {
+    m_fregisters[instruction.dst] += m_fregisters[instruction.src];
+}
+
+void RandomXVM::executeFADD_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_fregisters[instruction.dst] += int64ToDouble(value);
+}
+
+void RandomXVM::executeFSUB_R(const RandomXInstruction& instruction) {
+    m_fregisters[instruction.dst] -= m_fregisters[instruction.src];
+}
+
+void RandomXVM::executeFSUB_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    m_fregisters[instruction.dst] -= int64ToDouble(value);
+}
+
+void RandomXVM::executeFSCAL_R(const RandomXInstruction& instruction) {
+    m_fregisters[instruction.dst] = -m_fregisters[instruction.dst];
+}
+
+void RandomXVM::executeFMUL_R(const RandomXInstruction& instruction) {
+    m_fregisters[instruction.dst] *= m_fregisters[instruction.src];
+}
+
+void RandomXVM::executeFDIV_M(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    uint64_t value = 0;
+    
+    if (m_cache && !m_lightMode) {
+        const RandomXDatasetItem* item = m_cache->getDatasetItem(address / 64);
+        if (item) {
+            value = item->data[(address % 64) / 8];
+        }
+    }
+    
+    double divisor = int64ToDouble(value);
+    if (divisor != 0.0) {
+        m_fregisters[instruction.dst] /= divisor;
+    }
+}
+
+void RandomXVM::executeFSQRT_R(const RandomXInstruction& instruction) {
+    m_fregisters[instruction.dst] = std::sqrt(m_fregisters[instruction.dst]);
+}
+
+void RandomXVM::executeCBRANCH(const RandomXInstruction& instruction) {
+    m_branchRegister = (m_branchRegister + instruction.imm32) & instruction.modMask;
+    if (m_branchRegister == 0) {
+        m_programCounter = instruction.imm32 % RANDOMX_PROGRAM_SIZE;
+    }
+}
+
+void RandomXVM::executeCFROUND(const RandomXInstruction& instruction) {
+    // Simplified rounding mode change
+    // In a real implementation, this would change the FPU rounding mode
+}
+
+void RandomXVM::executeISTORE(const RandomXInstruction& instruction) {
+    uint32_t address = getMemoryAddress(instruction);
+    m_scratchpad[address % 8] = m_registers[instruction.src];
+}
+
+void RandomXVM::executeNOP(const RandomXInstruction& instruction) {
+    // No operation
+}
+
+// Utility functions
+uint64_t RandomXVM::rotateRight64(uint64_t x, int n) {
+    return (x >> n) | (x << (64 - n));
+}
+
+uint64_t RandomXVM::rotateLeft64(uint64_t x, int n) {
+    return (x << n) | (x >> (64 - n));
+}
+
+uint64_t RandomXVM::mulh(uint64_t a, uint64_t b) {
+    uint64_t a_lo = a & 0xFFFFFFFFULL;
+    uint64_t a_hi = a >> 32;
+    uint64_t b_lo = b & 0xFFFFFFFFULL;
+    uint64_t b_hi = b >> 32;
+    
+    uint64_t p0 = a_lo * b_lo;
+    uint64_t p1 = a_lo * b_hi;
+    uint64_t p2 = a_hi * b_lo;
+    uint64_t p3 = a_hi * b_hi;
+    
+    uint64_t p1_lo = p1 & 0xFFFFFFFFULL;
+    uint64_t p1_hi = p1 >> 32;
+    uint64_t p2_lo = p2 & 0xFFFFFFFFULL;
+    uint64_t p2_hi = p2 >> 32;
+    
+    uint64_t carry = ((p0 >> 32) + p1_lo + p2_lo) >> 32;
+    
+    return p3 + p1_hi + p2_hi + carry;
+}
+
+int64_t RandomXVM::smulh(int64_t a, int64_t b) {
+    return static_cast<int64_t>(mulh(static_cast<uint64_t>(a), static_cast<uint64_t>(b)));
+}
+
+double RandomXVM::int64ToDouble(uint64_t x) {
+    return static_cast<double>(static_cast<int64_t>(x));
+}
+
+uint64_t RandomXVM::doubleToInt64(double x) {
+    return static_cast<uint64_t>(static_cast<int64_t>(x));
+}
+
+void RandomXVM::generateProgram(const uint8_t* seed, size_t seedSize) {
+    for (uint32_t i = 0; i < RANDOMX_PROGRAM_SIZE; i++) {
+        m_program[i] = generateInstruction(i, seed, seedSize);
+    }
+}
+
+RandomXInstruction RandomXVM::generateInstruction(uint32_t pc, const uint8_t* seed, size_t seedSize) {
+    RandomXInstruction instruction = {};
+    
+    // Generate instruction type
+    uint64_t hash = 0;
+    for (size_t i = 0; i < seedSize; i++) {
+        hash ^= seed[i] << ((i % 8) * 8);
+    }
+    hash ^= pc;
+    
+    // Simple hash function
+    for (int i = 0; i < 4; i++) {
+        hash = hash * 0x9e3779b97f4a7c15ULL;
+        hash ^= hash >> 33;
+    }
+    
+    instruction.type = static_cast<RandomXInstructionType>(hash % 30);
+    instruction.dst = hash & 7;
+    instruction.src = (hash >> 8) & 7;
+    instruction.imm32 = static_cast<uint32_t>(hash >> 16);
+    instruction.imm64 = hash;
+    instruction.mod = (hash >> 32) & 7;
+    instruction.modShift = ((hash >> 35) & 7) + 1;
+    instruction.modMask = (1ULL << instruction.modShift) - 1;
+    
+    return instruction;
+}
+
+uint32_t RandomXVM::getRegisterMask(const RandomXInstruction& instruction) {
+    return instruction.modMask;
+}
+
+uint32_t RandomXVM::getMemoryAddress(const RandomXInstruction& instruction) {
+    uint32_t address = m_registers[instruction.src] + instruction.imm32;
+    return address & instruction.modMask;
+}
+
+// Main RandomX class implementation
+RandomX::RandomX() 
+    : m_cache(nullptr), m_initialized(false), m_lightMode(false),
+      m_totalHashes(0), m_validHashes(0), m_threadCount(1) {
+    m_startTime = std::chrono::steady_clock::now();
+    m_lastHashTime = m_startTime;
+}
+
+RandomX::~RandomX() {
+    destroy();
+}
+
+bool RandomX::initialize(const uint8_t* key, size_t keySize, bool lightMode) {
+    if (m_initialized) {
+        return true;
+    }
+    
+    m_lightMode = lightMode;
+    
+    // Create cache
+    m_cache = new RandomXCache();
+    if (!m_cache->initialize(key, keySize)) {
+        delete m_cache;
+        m_cache = nullptr;
+        return false;
+    }
+    
+    // Create VMs
+    m_threadCount = std::thread::hardware_concurrency();
+    if (m_threadCount == 0) {
+        m_threadCount = 1;
+    }
+    
+    for (int i = 0; i < m_threadCount; i++) {
+        auto vm = std::make_unique<RandomXVM>();
+        if (!vm->initialize(m_cache, lightMode)) {
+            return false;
+        }
+        m_vms.push_back(std::move(vm));
+    }
+    
+    m_initialized = true;
+    return true;
+}
+
+void RandomX::destroy() {
+    if (m_cache) {
+        delete m_cache;
+        m_cache = nullptr;
+    }
+    
+    m_vms.clear();
+    m_initialized = false;
+}
+
+void RandomX::calculateHash(const uint8_t* input, size_t inputSize, uint8_t* output) {
+    if (!m_initialized) {
+        return;
+    }
+    
+    calculateHashInternal(input, inputSize, output);
+    m_totalHashes++;
+    m_lastHashTime = std::chrono::steady_clock::now();
 }
 
 bool RandomX::isValidHash(const uint8_t* hash, const uint8_t* target) {
+    if (!hash || !target) {
+        return false;
+    }
+    
     // Compare hash with target (little-endian)
-    for (int i = 0; i < 32; i++) {
-        if (hash[i] < target[31-i]) {
+    for (int i = 31; i >= 0; i--) {
+        if (hash[i] < target[i]) {
+            m_validHashes++;
             return true;
-        } else if (hash[i] > target[31-i]) {
+        } else if (hash[i] > target[i]) {
             return false;
         }
     }
-    return false;
+    
+    m_validHashes++;
+    return true;
 }
 
-std::vector<uint8_t> RandomX::hexToBytes(const std::string& hex) {
-    std::vector<uint8_t> bytes;
-    if (hex.length() % 2 != 0) {
-        return bytes; // Invalid hex string
+double RandomX::getHashRate() const {
+    if (m_totalHashes == 0) {
+        return 0.0;
     }
     
+    auto now = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - m_startTime);
+    
+    if (duration.count() == 0) {
+        return 0.0;
+    }
+    
+    return static_cast<double>(m_totalHashes) / (duration.count() / 1000.0);
+}
+
+double RandomX::getAcceptanceRate() const {
+    if (m_totalHashes == 0) {
+        return 0.0;
+    }
+    
+    return static_cast<double>(m_validHashes) / m_totalHashes;
+}
+
+void RandomX::calculateHashInternal(const uint8_t* input, size_t inputSize, uint8_t* output) {
+    // Use the first VM for hash calculation
+    if (m_vms.empty()) {
+        return;
+    }
+    
+    auto& vm = m_vms[0];
+    vm->reset();
+    vm->loadProgram(input, inputSize);
+    vm->execute();
+    
+    // Finalize hash
+    finalizeHash(input, inputSize, output);
+}
+
+void RandomX::finalizeHash(const uint8_t* input, size_t inputSize, uint8_t* output) {
+    // Simple hash finalization
+    uint64_t hash = 0;
+    
+    // Add register values
+    for (int i = 0; i < 8; i++) {
+        hash ^= m_vms[0]->getRegister(i);
+        hash = hash * 0x9e3779b97f4a7c15ULL;
+    }
+    
+    // Add scratchpad values
+    for (int i = 0; i < 8; i++) {
+        hash ^= m_vms[0]->getScratchpad(i);
+        hash = hash * 0x9e3779b97f4a7c15ULL;
+    }
+    
+    // Add input
+    for (size_t i = 0; i < inputSize; i++) {
+        hash ^= input[i] << ((i % 8) * 8);
+        hash = hash * 0x9e3779b97f4a7c15ULL;
+    }
+    
+    // Output hash
+    for (int i = 0; i < 8; i++) {
+        uint64_t val = hash;
+        for (int j = 0; j < 4; j++) {
+            output[i * 4 + j] = (val >> (j * 8)) & 0xFF;
+        }
+        hash = hash * 0x9e3779b97f4a7c15ULL;
+    }
+}
+
+double RandomX::benchmark(uint32_t iterations) {
+    if (!m_initialized) {
+        return 0.0;
+    }
+    
+    uint8_t testInput[32] = {0};
+    uint8_t testOutput[32];
+    
+    auto start = std::chrono::steady_clock::now();
+    
+    for (uint32_t i = 0; i < iterations; i++) {
+        // Use iteration as input
+        *reinterpret_cast<uint32_t*>(testInput) = i;
+        calculateHash(testInput, sizeof(testInput), testOutput);
+    }
+    
+    auto end = std::chrono::steady_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    
+    if (duration.count() == 0) {
+        return 0.0;
+    }
+    
+    return static_cast<double>(iterations) / (duration.count() / 1000.0);
+}
+
+// Utility functions
+std::vector<uint8_t> RandomX::hexToBytes(const std::string& hex) {
+    std::vector<uint8_t> bytes;
+    
     for (size_t i = 0; i < hex.length(); i += 2) {
-        std::string byteString = hex.substr(i, 2);
-        try {
-            uint8_t byte = static_cast<uint8_t>(std::stoul(byteString, nullptr, 16));
-            bytes.push_back(byte);
-        } catch (const std::exception& e) {
-            LOG_ERROR("Failed to parse hex byte '{}': {}", byteString, e.what());
-            return std::vector<uint8_t>(); // Return empty on error
+        if (i + 1 < hex.length()) {
+            std::string byteString = hex.substr(i, 2);
+            try {
+                uint8_t byte = static_cast<uint8_t>(std::stoul(byteString, nullptr, 16));
+                bytes.push_back(byte);
+            } catch (const std::exception& e) {
+                // Invalid hex character, skip
+                continue;
+            }
         }
     }
+    
     return bytes;
 }
 
 std::string RandomX::bytesToHex(const uint8_t* bytes, size_t length) {
     std::ostringstream hex;
+    hex << std::hex << std::setfill('0');
+    
     for (size_t i = 0; i < length; i++) {
-        hex << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(bytes[i]);
+        hex << std::setw(2) << static_cast<int>(bytes[i]);
     }
+    
     return hex.str();
 }
