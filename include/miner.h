@@ -1,107 +1,100 @@
 #pragma once
 
-#include <memory>
-#include <atomic>
-#include <thread>
+#include "config_manager.h"
+#include "logger.h"
 #include <string>
 #include <vector>
-#include <chrono>
+#include <thread>
+#include <atomic>
+#include <mutex>
+#include <cstdint>
 
-class RandomXNative;
-class MetalGPUSimple;
-class CPUThrottleManager;
-class PoolConnection;
-class ConfigManager;
-class Logger;
-class PerformanceMonitor;
+// Forward declaration for RandomX
+class RandomX;
 
-/**
- * Main miner class optimized for Apple Silicon
- * Handles coordination between all mining components
- */
+struct MiningJob {
+    std::string jobId;
+    std::string blob;
+    std::string target;
+    uint32_t nonce;
+    bool isValid;
+    
+    MiningJob() : nonce(0), isValid(false) {}
+};
+
 class Miner {
 public:
     Miner();
     ~Miner();
-
+    
     // Initialize the miner with configuration
-    bool initialize(const std::string& configFile = "config.json");
-    bool initialize(std::shared_ptr<ConfigManager> configManager);
+    bool initialize(const ConfigManager& config);
     
-    // Start mining process
+    // Start/stop mining
     void start();
-    
-    // Stop mining process
     void stop();
     
     // Check if miner is running
     bool isRunning() const { return m_running; }
     
-    // Get mining statistics
-    struct MiningStats {
-        double hashrate;
-        uint64_t totalHashes;
-        uint64_t acceptedShares;
-        uint64_t rejectedShares;
-        double temperature;
-        double powerConsumption;
-        std::chrono::steady_clock::time_point startTime;
-    };
-    
-    MiningStats getStats() const;
-    
-private:
-    bool initializeInternal();
-    
-    // Get current hashrate
-    double getHashrate() const;
-    
-    // Get total hashes computed
-    uint64_t getTotalHashes() const { return m_totalHashes; }
+    // Check if connected to pool
+    bool isConnected() const { return m_connected; }
 
 private:
-    // Core mining loop
-    void miningLoop();
+    // RandomX initialization
+    bool initializeRandomX();
     
-    // Process a single hash
-    bool processHash(const std::vector<uint8_t>& input, std::vector<uint8_t>& output);
+    // Pool connection
+    bool connectToPool();
+    bool parsePoolUrl(const std::string& url, std::string& host, int& port, bool& useSSL);
+    bool setupSSL();
+    bool sendLogin();
+    bool sendData(const std::string& data);
+    bool receiveData(std::string& data);
     
-    // Submit share to pool
-    void submitShare(const std::vector<uint8_t>& nonce, const std::vector<uint8_t>& hash);
+    // Mining
+    void miningLoop(int threadId);
+    void mineJob(int threadId);
+    bool isValidShare(const uint8_t* hash, const std::string& target);
+    void submitShare(uint32_t nonce, const uint8_t* hash);
     
-    // Update performance metrics
-    void updateMetrics();
+    // Communication
+    void communicationLoop();
+    void processPoolMessage(const std::string& message);
+    std::string extractJsonValue(const std::string& json, const std::string& key);
     
-    // Handle CPU demand-based throttling
-    void handleCPUThrottling();
+    // Idle detection
+    void idleLoop();
+    bool checkSystemIdle();
+    void startMining();
+    void stopMining();
     
-    // Get current CPU usage
-    double getCPUUsage() const;
+    // Utilities
+    std::vector<uint8_t> hexToBytes(const std::string& hex);
+    std::string bytesToHex(const uint8_t* bytes, size_t length);
     
-    // Helper function to convert bytes to hex string
-    std::string bytesToHex(const std::vector<uint8_t>& bytes);
-
-private:
-    std::atomic<bool> m_running{false};
-    std::atomic<bool> m_shouldStop{false};
-    std::atomic<uint64_t> m_totalHashes{0};
-    std::atomic<uint64_t> m_acceptedShares{0};
-    std::atomic<uint64_t> m_rejectedShares{0};
+    // Configuration
+    ConfigManager m_config;
     
-    std::unique_ptr<RandomXNative> m_randomX;
-    std::unique_ptr<MetalGPUSimple> m_metalGPU;
-    std::unique_ptr<CPUThrottleManager> m_cpuThrottleManager;
-    std::unique_ptr<PoolConnection> m_poolConnection;
-    std::shared_ptr<ConfigManager> m_configManager;
-    std::unique_ptr<Logger> m_logger;
-    std::unique_ptr<PerformanceMonitor> m_performanceMonitor;
+    // Mining state
+    std::atomic<bool> m_running;
+    std::atomic<bool> m_connected;
+    MiningJob m_currentJob;
     
-    std::thread m_miningThread;
-    std::chrono::steady_clock::time_point m_startTime;
+    // Threading
+    std::vector<std::thread> m_miningThreads;
+    std::thread m_communicationThread;
+    std::thread m_idleThread;
     
-    // Performance tracking
-    mutable std::mutex m_statsMutex;
-    double m_currentHashrate{0.0};
-    double m_temperature{0.0};
-    double m_powerConsumption{0.0};
+    // Idle detection
+    int m_idleTime;
+    bool m_miningActive;
+    
+    // Network
+    int m_socket;
+    void* m_ssl;  // SSL*
+    void* m_sslContext;  // SSL_CTX*
+    
+    // RandomX
+    std::unique_ptr<RandomX> m_randomx;
 };

@@ -4,6 +4,8 @@
 #include <sstream>
 #include <filesystem>
 #include <string>
+#include <mutex>
+#include <atomic>
 
 
 // Global logger instance
@@ -70,6 +72,8 @@ void Logger::critical(const std::string& message) {
     log(Level::Critical, message);
 }
 
+// Template methods are implemented in header
+
 void Logger::flush() {
     if (m_fileStream && m_fileStream->is_open()) {
         m_fileStream->flush();
@@ -133,6 +137,7 @@ void Logger::log(Level level, const std::string& message) {
         rotateLogFile();
     }
 }
+
 
 std::string Logger::formatMessage(Level level, const std::string& message) {
     auto now = std::chrono::system_clock::now();

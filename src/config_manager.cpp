@@ -24,7 +24,7 @@ ConfigManager::ConfigManager(const ConfigManager& other) {
 ConfigManager::~ConfigManager() = default;
 
 bool ConfigManager::loadFromFile(const std::string& filename) {
-    LOG_INFO("Loading configuration from file: {}", filename);
+    LOG_INFO("Loading configuration from file: " + filename);
     
     std::ifstream file(filename);
     if (!file.is_open()) {
@@ -46,12 +46,12 @@ bool ConfigManager::loadFromFile(const std::string& filename) {
         return false;
     }
     
-    LOG_INFO("Configuration loaded successfully from {}", filename);
+    LOG_INFO("Configuration loaded successfully from " + filename);
     return true;
 }
 
 bool ConfigManager::saveToFile(const std::string& filename) const {
-    LOG_INFO("Saving configuration to file: {}", filename);
+    LOG_INFO("Saving configuration to file: " + filename);
     
     std::ofstream file(filename);
     if (!file.is_open()) {
@@ -269,53 +269,42 @@ bool ConfigManager::parseJsonConfig(const std::string& jsonData) {
         return false;
     }
     
-    // Parse mining configuration
-    if (json.hasKey("mining")) {
-        // This is a simplified approach - in practice, you'd parse nested objects
-        m_miningConfig.algorithm = json.getString("mining.algorithm", "randomx");
-        m_miningConfig.threads = json.getInt("mining.threads", 0);
-        m_miningConfig.useGPU = json.getBool("mining.useGPU", true);
-        m_miningConfig.useHugePages = json.getBool("mining.useHugePages", false);
-        m_miningConfig.intensity = json.getInt("mining.intensity", 100);
-    }
+    // Parse mining configuration (flat JSON structure)
+    m_miningConfig.algorithm = json.getString("mining.algorithm", "randomx");
+    m_miningConfig.threads = json.getInt("mining.threads", 0);
+    m_miningConfig.useGPU = json.getBool("mining.useGPU", true);
+    m_miningConfig.useHugePages = json.getBool("mining.useHugePages", false);
+    m_miningConfig.intensity = json.getInt("mining.intensity", 100);
     
-    // Parse pool configuration
-    if (json.hasKey("pool")) {
-        m_poolConfig.url = json.getString("pool.url", "");
-        m_poolConfig.username = json.getString("pool.username", "");
-        m_poolConfig.password = json.getString("pool.password", "");
-        m_poolConfig.workerId = json.getString("pool.workerId", "");
-        m_poolConfig.port = json.getInt("pool.port", 0);
-        m_poolConfig.ssl = json.getBool("pool.ssl", false);
-        m_poolConfig.timeout = json.getInt("pool.timeout", 30);
-        m_poolConfig.keepAlive = json.getInt("pool.keepAlive", 60);
-    }
+    // Parse pool configuration (flat JSON structure)
+    m_poolConfig.url = json.getString("pool.url", "");
+    m_poolConfig.username = json.getString("pool.username", "");
+    m_poolConfig.password = json.getString("pool.password", "");
+    m_poolConfig.workerId = json.getString("pool.workerId", "");
+    m_poolConfig.port = json.getInt("pool.port", 0);
+    m_poolConfig.ssl = json.getBool("pool.ssl", false);
+    m_poolConfig.timeout = json.getInt("pool.timeout", 30);
+    m_poolConfig.keepAlive = json.getInt("pool.keepAlive", 60);
     
-    // Parse CPU throttling configuration
-    if (json.hasKey("cpuThrottling")) {
-        m_thermalConfig.maxCpuTemp = json.getDouble("cpuThrottling.lowThreshold", 20.0);
-        m_thermalConfig.maxGpuTemp = json.getDouble("cpuThrottling.highThreshold", 60.0);
-        m_thermalConfig.maxSystemTemp = json.getDouble("cpuThrottling.maxThreshold", 80.0);
-        m_thermalConfig.enableThrottling = json.getBool("cpuThrottling.enableThrottling", true);
-        m_thermalConfig.monitoringInterval = json.getInt("cpuThrottling.monitoringInterval", 500);
-    }
+    // Parse CPU throttling configuration (flat JSON structure)
+    m_thermalConfig.maxCpuTemp = json.getDouble("cpuThrottling.lowThreshold", 20.0);
+    m_thermalConfig.maxGpuTemp = json.getDouble("cpuThrottling.highThreshold", 60.0);
+    m_thermalConfig.maxSystemTemp = json.getDouble("cpuThrottling.maxThreshold", 80.0);
+    m_thermalConfig.enableThrottling = json.getBool("cpuThrottling.enableThrottling", true);
+    m_thermalConfig.monitoringInterval = json.getInt("cpuThrottling.monitoringInterval", 500);
     
-    // Parse logging configuration
-    if (json.hasKey("logging")) {
-        m_loggingConfig.level = json.getString("logging.level", "info");
-        m_loggingConfig.file = json.getString("logging.file", "");
-        m_loggingConfig.console = json.getBool("logging.console", true);
-        m_loggingConfig.maxFileSize = json.getInt("logging.maxFileSize", 10485760);
-        m_loggingConfig.maxFiles = json.getInt("logging.maxFiles", 5);
-    }
+    // Parse logging configuration (flat JSON structure)
+    m_loggingConfig.level = json.getString("logging.level", "info");
+    m_loggingConfig.file = json.getString("logging.file", "");
+    m_loggingConfig.console = json.getBool("logging.console", true);
+    m_loggingConfig.maxFileSize = json.getInt("logging.maxFileSize", 10485760);
+    m_loggingConfig.maxFiles = json.getInt("logging.maxFiles", 5);
     
-    // Parse performance configuration
-    if (json.hasKey("performance")) {
-        m_performanceConfig.enableMetrics = json.getBool("performance.enableMetrics", true);
-        m_performanceConfig.metricsInterval = json.getInt("performance.metricsInterval", 5000);
-        m_performanceConfig.enableProfiling = json.getBool("performance.enableProfiling", false);
-        m_performanceConfig.profileFile = json.getString("performance.profileFile", "profile.json");
-    }
+    // Parse performance configuration (flat JSON structure)
+    m_performanceConfig.enableMetrics = json.getBool("performance.enableMetrics", true);
+    m_performanceConfig.metricsInterval = json.getInt("performance.metricsInterval", 5000);
+    m_performanceConfig.enableProfiling = json.getBool("performance.enableProfiling", false);
+    m_performanceConfig.profileFile = json.getString("performance.profileFile", "profile.json");
     
     LOG_DEBUG("JSON configuration parsed successfully");
     return true;

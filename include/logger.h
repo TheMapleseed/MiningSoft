@@ -43,29 +43,29 @@ public:
     void error(const std::string& message);
     void critical(const std::string& message);
     
-    // Log with formatting
+    // Logging with format string support
     template<typename... Args>
-    void debug(const std::string& format, Args... args) {
+    void debug(const std::string& format, const Args&... args) {
         log(Level::Debug, format, args...);
     }
     
     template<typename... Args>
-    void info(const std::string& format, Args... args) {
+    void info(const std::string& format, const Args&... args) {
         log(Level::Info, format, args...);
     }
     
     template<typename... Args>
-    void warning(const std::string& format, Args... args) {
+    void warning(const std::string& format, const Args&... args) {
         log(Level::Warning, format, args...);
     }
     
     template<typename... Args>
-    void error(const std::string& format, Args... args) {
+    void error(const std::string& format, const Args&... args) {
         log(Level::Error, format, args...);
     }
     
     template<typename... Args>
-    void critical(const std::string& format, Args... args) {
+    void critical(const std::string& format, const Args&... args) {
         log(Level::Critical, format, args...);
     }
     
@@ -90,7 +90,7 @@ private:
     // Internal log method
     void log(Level level, const std::string& message);
     
-    // Log with formatting
+    // Template log method with format string support
     template<typename... Args>
     void log(Level level, const std::string& format, const Args&... args) {
         if (level < m_level) return;
@@ -99,7 +99,7 @@ private:
         formatMessage(oss, format, args...);
         
         if (m_console) {
-            std::cout << oss.str() << std::endl;
+            std::cout << getLevelColor(level) << oss.str() << COLOR_RESET << std::endl;
         }
         
         if (m_file && m_fileStream && m_fileStream->is_open()) {
@@ -108,13 +108,9 @@ private:
         }
     }
     
-    // Format log message
-    std::string formatMessage(Level level, const std::string& message);
-    
-    // Format log message with variadic arguments
+    // Format message with variadic arguments
     template<typename... Args>
     void formatMessage(std::ostringstream& oss, const std::string& format, const Args&... args) {
-        // Simple format implementation - just concatenate arguments
         formatMessageImpl(oss, format, args...);
     }
     
@@ -144,6 +140,9 @@ private:
     void formatMessageImpl(std::ostringstream& oss, const std::string& format) {
         oss << format;
     }
+    
+    // Format log message
+    std::string formatMessage(Level level, const std::string& message);
     
     // Get level string
     std::string levelToString(Level level) const;

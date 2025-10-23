@@ -2,6 +2,9 @@
 #include "logger.h"
 #include <algorithm>
 #include <numeric>
+#include <thread>
+#include <chrono>
+#include <functional>
 
 #ifdef __APPLE__
 #include <mach/mach.h>
@@ -142,7 +145,7 @@ void CPUThrottleManager::cpuMonitoringLoop() {
             } else {
                 if (m_throttling) {
                     m_throttling = false;
-                    LOG_INFO("CPU throttling deactivated - Usage: {:.1f}%", cpuUsage);
+                    LOG_INFO("CPU throttling deactivated - Usage: {:.1f}% " + std::to_string(cpuUsage));
                 }
                 resetThrottling();
             }

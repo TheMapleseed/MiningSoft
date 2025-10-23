@@ -1,123 +1,231 @@
 #include "miner.h"
 #include "logger.h"
-#include "cpu_throttle_manager.h"
-#include "randomx_native.h"
-#include "metal_gpu_simple.h"
-#include "pool_connection.h"
 #include "config_manager.h"
-#include "performance_monitor.h"
-#include <chrono>
+#include <iostream>
 #include <thread>
+#include <chrono>
+#include <vector>
+#include <string>
+#include <sstream>
+#include <iomanip>
 #include <random>
-#include <mutex>
-#include <cstring>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <sys/types.h>
+#include <sys/sysctl.h>
+#include <mach/mach.h>
 
-Miner::Miner() : m_startTime(std::chrono::steady_clock::now()) {
-    LOG_DEBUG("Miner constructor called");
+#include "randomx.h"
+
+Miner::Miner() : m_running(false), m_connected(false), m_socket(-1), m_ssl(nullptr), m_sslContext(nullptr), m_idleTime(0), m_miningActive(false) {
 }
 
 Miner::~Miner() {
     stop();
-    LOG_DEBUG("Miner destructor called");
-}
-
-bool Miner::initialize(const std::string& configFile) {
-    LOG_INFO("Initializing miner with config file: {}", configFile);
-    
-    try {
-        // Initialize configuration manager
-        m_configManager = std::make_shared<ConfigManager>();
-        if (!m_configManager->loadFromFile(configFile)) {
-            LOG_ERROR("Failed to load configuration from {}", configFile);
-            return false;
-        }
-        
-        return initializeInternal();
-    } catch (const std::exception& e) {
-        LOG_ERROR("Exception during miner initialization: {}", e.what());
-        return false;
+    if (m_socket != -1) {
+        close(m_socket);
     }
 }
 
-bool Miner::initialize(std::shared_ptr<ConfigManager> configManager) {
-    LOG_INFO("Initializing miner with provided configuration");
+bool Miner::initialize(const ConfigManager& config) {
+    LOG_INFO("Initializing Monero miner");
     
-    try {
-        // Use provided configuration manager
-        m_configManager = configManager;
-        
-        return initializeInternal();
-    } catch (const std::exception& e) {
-        LOG_ERROR("Exception during miner initialization: {}", e.what());
+    // Store configuration
+    m_config = config;
+    
+    // Initialize RandomX
+    if (!initializeRandomX()) {
+        LOG_ERROR("Failed to initialize RandomX");
         return false;
     }
+    
+    // Connect to mining pool
+    if (!connectToPool()) {
+        LOG_ERROR("Failed to connect to mining pool");
+            return false;
+        }
+        
+    LOG_INFO("Miner initialized successfully");
+    return true;
 }
 
-bool Miner::initializeInternal() {
-    try {
+bool Miner::initializeRandomX() {
+    LOG_INFO("Initializing RandomX algorithm");
+    
+    m_randomx = std::make_unique<RandomX>();
+    if (!m_randomx->initialize()) {
+        LOG_ERROR("Failed to initialize RandomX");
+        return false;
+    }
+    
+    LOG_INFO("RandomX initialized successfully");
+    return true;
+}
+
+bool Miner::connectToPool() {
+    LOG_INFO("Connecting to mining pool: {}", m_config.getPoolConfig().url);
+    
+    // Parse pool URL
+    std::string host;
+    int port;
+    bool useSSL;
+    
+    if (!parsePoolUrl(m_config.getPoolConfig().url, host, port, useSSL)) {
+        LOG_ERROR("Failed to parse pool URL: {}", m_config.getPoolConfig().url);
+        return false;
+    }
+    
+    // Create socket
+    m_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (m_socket == -1) {
+        LOG_ERROR("Failed to create socket: {}", strerror(errno));
+        return false;
+    }
+    
+    // Resolve hostname
+    struct hostent* he = gethostbyname(host.c_str());
+    if (!he) {
+        LOG_ERROR("Failed to resolve hostname: {}", host);
+        return false;
+    }
+    
+    // Connect to pool
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr = *((struct in_addr*)he->h_addr);
+    
+    if (connect(m_socket, (struct sockaddr*)&addr, sizeof(addr)) == -1) {
+        LOG_ERROR("Failed to connect to pool {}:{} - {}", host, port, strerror(errno));
+        return false;
+    }
+    
+    LOG_INFO("Connected to pool {}:{}", host, port);
         
-        // Initialize logger with configuration
-        auto logConfig = m_configManager->getLoggingConfig();
-        g_logger = std::make_unique<Logger>();
-        if (!g_logger->initialize(
-                logConfig.level == "debug" ? Logger::Level::Debug :
-                logConfig.level == "warn" ? Logger::Level::Warning :
-                logConfig.level == "error" ? Logger::Level::Error : Logger::Level::Info,
-                logConfig.file, logConfig.console)) {
-            LOG_ERROR("Failed to initialize logger");
+    // Note: SSL support removed for simplicity
+    if (useSSL) {
+        LOG_WARNING("SSL support not implemented, using plain TCP");
+    }
+    
+    // Send login request
+    if (!sendLogin()) {
+        LOG_ERROR("Failed to send login request");
             return false;
         }
         
-        // Initialize native RandomX
-        m_randomX = std::make_unique<RandomXNative>();
-        if (!m_randomX->initialize({0x01, 0x02, 0x03, 0x04})) { // Placeholder seed
-            LOG_ERROR("Failed to initialize native RandomX");
+    m_connected = true;
+    LOG_INFO("Connected to mining pool successfully");
+    return true;
+}
+
+bool Miner::parsePoolUrl(const std::string& url, std::string& host, int& port, bool& useSSL) {
+    LOG_DEBUG("Parsing pool URL: '{}' (length: {})", url, url.length());
+    
+    // Parse stratum+tcp://host:port or stratum+ssl://host:port
+    if (url.length() > 14 && url.substr(0, 14) == "stratum+tcp://") {
+        useSSL = false;
+        std::string hostPort = url.substr(14);
+        size_t colonPos = hostPort.find(':');
+        if (colonPos == std::string::npos) {
+            LOG_ERROR("No port found in URL: {}", url);
             return false;
         }
-        
-        // Initialize Metal GPU if enabled
-        auto miningConfig = m_configManager->getMiningConfig();
-        if (miningConfig.useGPU) {
-            m_metalGPU = std::make_unique<MetalGPUSimple>();
-            if (!m_metalGPU->initialize()) {
-                LOG_WARNING("Failed to initialize Metal GPU, continuing with CPU only");
-                m_metalGPU.reset();
-            } else {
-                LOG_INFO("Metal GPU initialized successfully");
-            }
-        }
-        
-        // Initialize CPU throttle manager
-        m_cpuThrottleManager = std::make_unique<CPUThrottleManager>();
-        if (!m_cpuThrottleManager->initialize()) {
-            LOG_ERROR("Failed to initialize CPU throttle manager");
+        host = hostPort.substr(0, colonPos);
+        try {
+            port = std::stoi(hostPort.substr(colonPos + 1));
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to parse port: {}", e.what());
             return false;
         }
-        
-        // Set CPU usage thresholds for intelligent throttling
-        m_cpuThrottleManager->setThresholds(20.0, 60.0, 80.0); // Low, High, Max thresholds
-        
-        // Initialize pool connection
-        m_poolConnection = std::make_unique<PoolConnection>();
-        auto poolConfig = m_configManager->getPoolConfig();
-        if (!m_poolConnection->initialize(poolConfig.url, poolConfig.username, 
-                                        poolConfig.password, poolConfig.workerId)) {
-            LOG_ERROR("Failed to initialize pool connection");
+        LOG_DEBUG("Parsed TCP: host={}, port={}", host, port);
+    } else if (url.length() > 15 && url.substr(0, 15) == "stratum+ssl://") {
+        useSSL = true;
+        std::string hostPort = url.substr(15);
+        size_t colonPos = hostPort.find(':');
+        if (colonPos == std::string::npos) {
+            LOG_ERROR("No port found in URL: {}", url);
             return false;
         }
-        
-        // Initialize performance monitor
-        m_performanceMonitor = std::make_unique<PerformanceMonitor>();
-        if (!m_performanceMonitor->initialize()) {
-            LOG_ERROR("Failed to initialize performance monitor");
+        host = hostPort.substr(0, colonPos);
+        try {
+            port = std::stoi(hostPort.substr(colonPos + 1));
+        } catch (const std::exception& e) {
+            LOG_ERROR("Failed to parse port: {}", e.what());
             return false;
         }
-        
-        LOG_INFO("Miner initialized successfully");
+        LOG_DEBUG("Parsed SSL: host={}, port={}", host, port);
+    } else {
+        LOG_ERROR("Invalid URL format: '{}' (expected stratum+tcp:// or stratum+ssl://)", url);
+        LOG_DEBUG("First 15 chars: '{}'", url.substr(0, 15));
+        return false;
+    }
+    return true;
+}
+
+// SSL setup removed for simplicity
+
+bool Miner::sendLogin() {
+    // Create login request
+    std::ostringstream json;
+    json << "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"login\",\"params\":{";
+    json << "\"login\":\"" << m_config.getPoolConfig().username << "\",";
+    json << "\"pass\":\"" << m_config.getPoolConfig().password << "\",";
+    json << "\"agent\":\"MiningSoft/1.0\",";
+    json << "\"algo\":[\"rx/0\"]";
+    json << "}}";
+    
+    std::string request = json.str();
+    LOG_DEBUG("Sending login request: {}", request);
+    
+    if (!sendData(request)) {
+        return false;
+    }
+    
+    // Read response
+    std::string response;
+    if (!receiveData(response)) {
+        return false;
+    }
+    
+    LOG_DEBUG("Received login response: {}", response);
+    
+    // Parse response (simplified - just check for success)
+    if (response.find("\"result\"") != std::string::npos) {
+        LOG_INFO("Login successful");
         return true;
-        
-    } catch (const std::exception& e) {
-        LOG_ERROR("Exception during miner initialization: {}", e.what());
+    } else {
+        LOG_ERROR("Login failed: {}", response);
+        return false;
+    }
+}
+
+bool Miner::sendData(const std::string& data) {
+    int result = send(m_socket, data.c_str(), data.length(), 0);
+    if (result <= 0) {
+        LOG_ERROR("Failed to send data: {}", strerror(errno));
+        return false;
+    }
+    LOG_DEBUG("Sent {} bytes", result);
+    return true;
+}
+
+bool Miner::receiveData(std::string& data) {
+    char buffer[4096];
+    int bytes = recv(m_socket, buffer, sizeof(buffer) - 1, 0);
+    
+    if (bytes > 0) {
+        buffer[bytes] = '\0';
+        data = std::string(buffer);
+        LOG_DEBUG("Received {} bytes: {}", bytes, data);
+        return true;
+    } else if (bytes == 0) {
+        LOG_ERROR("Connection closed by peer");
+        return false;
+    } else {
+        LOG_ERROR("Failed to receive data: {}", strerror(errno));
         return false;
     }
 }
@@ -128,28 +236,14 @@ void Miner::start() {
         return;
     }
     
-    LOG_INFO("Starting miner");
-    
     m_running = true;
-    m_shouldStop = false;
-    m_startTime = std::chrono::steady_clock::now();
+    LOG_INFO("Starting miner (idle detection enabled)...");
     
-    // Start CPU demand monitoring
-    m_cpuThrottleManager->start();
+    // Start idle monitoring thread
+    m_idleThread = std::thread(&Miner::idleLoop, this);
     
-    // Start performance monitoring
-    m_performanceMonitor->start();
-    
-    // Connect to pool
-    auto result = m_poolConnection->connect();
-    if (result != PoolConnection::ConnectionResult::Success) {
-        LOG_WARNING("Failed to connect to pool, continuing with solo mining");
-    }
-    
-    // Start mining thread
-    m_miningThread = std::thread(&Miner::miningLoop, this);
-    
-    LOG_INFO("Miner started successfully");
+    // Start communication thread
+    m_communicationThread = std::thread(&Miner::communicationLoop, this);
 }
 
 void Miner::stop() {
@@ -157,231 +251,265 @@ void Miner::stop() {
         return;
     }
     
-    LOG_INFO("Stopping miner");
-    
-    m_shouldStop = true;
     m_running = false;
+    LOG_INFO("Stopping miner...");
     
-    // Wait for mining thread to finish
-    if (m_miningThread.joinable()) {
-        m_miningThread.join();
+    // Stop mining if active
+    if (m_miningActive) {
+        stopMining();
     }
     
-    // Stop monitoring
-    if (m_cpuThrottleManager) {
-        m_cpuThrottleManager->stop();
+    // Wait for idle thread
+    if (m_idleThread.joinable()) {
+        m_idleThread.join();
     }
     
-    if (m_performanceMonitor) {
-        m_performanceMonitor->stop();
+    // Wait for mining threads
+    for (auto& thread : m_miningThreads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
     }
+    m_miningThreads.clear();
     
-    // Disconnect from pool
-    if (m_poolConnection) {
-        m_poolConnection->disconnect();
+    // Wait for communication thread
+    if (m_communicationThread.joinable()) {
+        m_communicationThread.join();
     }
     
     LOG_INFO("Miner stopped");
 }
 
-double Miner::getHashrate() const {
-    std::lock_guard<std::mutex> lock(m_statsMutex);
-    return m_currentHashrate;
+void Miner::miningLoop(int threadId) {
+    LOG_INFO("Mining thread {} started", threadId);
+    
+    while (m_running && m_miningActive) {
+        if (!m_currentJob.isValid) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            continue;
+        }
+        
+        // Mine the current job
+        mineJob(threadId);
+    }
+    
+    LOG_INFO("Mining thread {} stopped", threadId);
 }
 
-Miner::MiningStats Miner::getStats() const {
-    std::lock_guard<std::mutex> lock(m_statsMutex);
-    
-    MiningStats stats;
-    stats.hashrate = m_currentHashrate;
-    stats.totalHashes = m_totalHashes.load();
-    stats.acceptedShares = m_acceptedShares.load();
-    stats.rejectedShares = m_rejectedShares.load();
-    stats.temperature = m_temperature;
-    stats.powerConsumption = m_powerConsumption;
-    stats.startTime = m_startTime;
-    
-    return stats;
+void Miner::mineJob(int threadId) {
+    try {
+        // Convert job blob from hex to bytes
+        std::vector<uint8_t> blob = RandomX::hexToBytes(m_currentJob.blob);
+        if (blob.empty()) {
+            LOG_ERROR("Invalid job blob: {}", m_currentJob.blob);
+            return;
+        }
+        
+        // Create nonce
+        uint32_t nonce = m_currentJob.nonce + threadId;
+        
+        // Hash the job
+        uint8_t hash[32];
+        m_randomx->calculateHash(blob.data(), blob.size(), hash);
+        
+        // Check if hash meets target
+        if (isValidShare(hash, m_currentJob.target)) {
+            LOG_INFO("Valid share found by thread {}: nonce={}", threadId, nonce);
+            submitShare(nonce, hash);
+        }
+        
+        // Update nonce for next iteration
+        m_currentJob.nonce += m_miningThreads.size();
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception in mining loop: {}", e.what());
+    }
 }
 
-void Miner::miningLoop() {
-    LOG_INFO("Mining loop started");
+bool Miner::isValidShare(const uint8_t* hash, const std::string& target) {
+    try {
+        // Convert target from hex to bytes
+        std::vector<uint8_t> targetBytes = RandomX::hexToBytes(target);
+        if (targetBytes.size() != 32) {
+            LOG_ERROR("Invalid target size: {} (expected 32)", targetBytes.size());
+            return false;
+        }
+        
+        return m_randomx->isValidHash(hash, targetBytes.data());
+    } catch (const std::exception& e) {
+        LOG_ERROR("Exception in isValidShare: {}", e.what());
+        return false;
+    }
+}
+
+void Miner::submitShare(uint32_t nonce, const uint8_t* hash) {
+    // Convert hash to hex
+    std::string hashHex = RandomX::bytesToHex(hash, 32);
     
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<uint32_t> dis;
+    // Create submit request
+    std::ostringstream json;
+    json << "{\"id\":2,\"jsonrpc\":\"2.0\",\"method\":\"submit\",\"params\":{";
+    json << "\"id\":\"" << m_config.getPoolConfig().workerId << "\",";
+    json << "\"job_id\":\"" << m_currentJob.jobId << "\",";
+    json << "\"nonce\":\"" << std::hex << nonce << "\",";
+    json << "\"result\":\"" << hashHex << "\"";
+    json << "}}";
     
-    auto lastHashTime = std::chrono::steady_clock::now();
-    uint64_t hashCount = 0;
+    std::string request = json.str();
+    LOG_DEBUG("Submitting share: {}", request);
     
-    while (!m_shouldStop && m_running) {
-        try {
-            // Get current job from pool
-            auto job = m_poolConnection->getCurrentJob();
-            if (!job.isValid) {
-                // If no valid job from pool, create a test job for solo mining
-                job.blob = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
-                job.target = "00000000ffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
-                job.jobId = "test-job";
-                job.isValid = true;
-            }
-            
-            // Check CPU demand-based throttling
-            handleCPUThrottling();
-            
-            // Generate random nonce
-            uint32_t nonce = dis(gen);
-            
-            // Prepare input for hashing
-            std::vector<uint8_t> input;
-            input.insert(input.end(), job.blob.begin(), job.blob.end());
-            input.push_back((nonce >> 24) & 0xFF);
-            input.push_back((nonce >> 16) & 0xFF);
-            input.push_back((nonce >> 8) & 0xFF);
-            input.push_back(nonce & 0xFF);
-            
-            // Hash the input
-            std::vector<uint8_t> hash = m_randomX->hash(input);
-            
-            // Increment hash count
-            m_totalHashes++;
-            hashCount++;
-            
-            // Check if hash meets target
-            uint64_t target = std::stoull(job.target, nullptr, 16);
-            if (m_randomX->verifyHash(hash, target)) {
-                LOG_INFO("Found valid share! Nonce: 0x{:08x}", nonce);
-                
-                // Submit share to pool
-                std::string nonceStr = std::to_string(nonce);
-                std::string hashStr = bytesToHex(hash);
-                
-                auto result = m_poolConnection->submitShare(job.jobId, nonceStr, hashStr);
-                if (result.accepted) {
-                    m_acceptedShares++;
-                    LOG_INFO("Share accepted by pool");
-                } else {
-                    m_rejectedShares++;
-                    LOG_WARNING("Share rejected by pool: {}", result.reason);
-                }
-            }
-            
-            // Update performance metrics periodically
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastHashTime).count() >= 1) {
-                updateMetrics();
-                
-                // Update performance monitor
-                if (m_performanceMonitor) {
-                    m_performanceMonitor->updateMiningMetrics(
-                        hashCount, m_currentHashrate, m_temperature
-                    );
-                }
-                
-                lastHashTime = now;
-                hashCount = 0;
-            }
-            
-        } catch (const std::exception& e) {
-            LOG_ERROR("Exception in mining loop: {}", e.what());
-            std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+    if (sendData(request)) {
+        LOG_INFO("Share submitted successfully");
+    } else {
+        LOG_ERROR("Failed to submit share");
+    }
+}
+
+void Miner::communicationLoop() {
+    LOG_INFO("Communication thread started");
+    
+    while (m_running) {
+        std::string response;
+        if (receiveData(response)) {
+            processPoolMessage(response);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
     
-    LOG_INFO("Mining loop ended");
+    LOG_INFO("Communication thread stopped");
 }
 
-bool Miner::processHash(const std::vector<uint8_t>& input, std::vector<uint8_t>& output) {
-    if (!m_randomX) {
+void Miner::processPoolMessage(const std::string& message) {
+    LOG_DEBUG("Received pool message: {}", message);
+    
+    // Parse job assignment (simplified)
+    if (message.find("\"method\":\"job\"") != std::string::npos) {
+        // Extract job parameters (simplified parsing)
+        size_t blobPos = message.find("\"blob\":\"");
+        size_t targetPos = message.find("\"target\":\"");
+        size_t jobIdPos = message.find("\"job_id\":\"");
+        
+        if (blobPos != std::string::npos && targetPos != std::string::npos && jobIdPos != std::string::npos) {
+            // Extract values (simplified)
+            m_currentJob.blob = extractJsonValue(message, "blob");
+            m_currentJob.target = extractJsonValue(message, "target");
+            m_currentJob.jobId = extractJsonValue(message, "job_id");
+            m_currentJob.nonce = 0;
+            m_currentJob.isValid = true;
+            
+            LOG_INFO("New job received: {}", m_currentJob.jobId);
+        }
+    }
+}
+
+std::string Miner::extractJsonValue(const std::string& json, const std::string& key) {
+    std::string searchKey = "\"" + key + "\":\"";
+    size_t start = json.find(searchKey);
+    if (start == std::string::npos) {
+        return "";
+    }
+    start += searchKey.length();
+    size_t end = json.find("\"", start);
+    if (end == std::string::npos) {
+        return "";
+    }
+    return json.substr(start, end - start);
+}
+
+std::vector<uint8_t> Miner::hexToBytes(const std::string& hex) {
+    std::vector<uint8_t> bytes;
+    for (size_t i = 0; i < hex.length(); i += 2) {
+        std::string byteString = hex.substr(i, 2);
+        uint8_t byte = static_cast<uint8_t>(std::stoul(byteString, nullptr, 16));
+        bytes.push_back(byte);
+    }
+    return bytes;
+}
+
+std::string Miner::bytesToHex(const uint8_t* bytes, size_t length) {
+    std::ostringstream hex;
+    for (size_t i = 0; i < length; i++) {
+        hex << std::hex << std::setfill('0') << std::setw(2) << static_cast<int>(bytes[i]);
+    }
+    return hex.str();
+}
+
+void Miner::idleLoop() {
+    LOG_INFO("Idle monitoring started");
+    
+    while (m_running) {
+        // Check if system is idle
+        bool isIdle = checkSystemIdle();
+        
+        if (isIdle && !m_miningActive) {
+            m_idleTime++;
+            if (m_idleTime >= 30) { // 30 seconds of idle time
+                LOG_INFO("System idle for {} seconds, starting mining...", m_idleTime);
+                startMining();
+            }
+        } else if (!isIdle && m_miningActive) {
+            LOG_INFO("System activity detected, stopping mining...");
+            stopMining();
+            m_idleTime = 0;
+        } else if (isIdle && m_miningActive) {
+            m_idleTime++;
+        } else {
+            m_idleTime = 0;
+        }
+        
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+    }
+    
+    LOG_INFO("Idle monitoring stopped");
+}
+
+bool Miner::checkSystemIdle() {
+    // Get system load average
+    double loadavg[3];
+    if (getloadavg(loadavg, 3) == -1) {
         return false;
     }
     
-    output = m_randomX->hash(input);
-    return !output.empty();
+    // Check if load average is low (system idle)
+    return loadavg[0] < 0.5; // Less than 0.5 average load
 }
 
-void Miner::submitShare(const std::vector<uint8_t>& nonce, const std::vector<uint8_t>& hash) {
-    if (!m_poolConnection) {
+void Miner::startMining() {
+    if (m_miningActive) {
         return;
     }
     
-    // Convert nonce and hash to strings
-    std::string nonceStr = bytesToHex(nonce);
-    std::string hashStr = bytesToHex(hash);
+    m_miningActive = true;
+    LOG_INFO("Starting mining threads...");
     
-    // Get current job
-    auto job = m_poolConnection->getCurrentJob();
-    if (!job.isValid) {
-        LOG_WARNING("No valid job available for share submission");
+    // Start mining threads
+    int numThreads = m_config.getMiningConfig().threads;
+    if (numThreads == 0) {
+        numThreads = std::thread::hardware_concurrency();
+    }
+    
+    for (int i = 0; i < numThreads; i++) {
+        m_miningThreads.emplace_back(&Miner::miningLoop, this, i);
+    }
+    
+    LOG_INFO("Mining started with {} threads", numThreads);
+}
+
+void Miner::stopMining() {
+    if (!m_miningActive) {
         return;
     }
     
-    // Submit share
-    auto result = m_poolConnection->submitShare(job.jobId, nonceStr, hashStr);
-    if (result.accepted) {
-        m_acceptedShares++;
-        LOG_INFO("Share accepted by pool");
-    } else {
-        m_rejectedShares++;
-        LOG_WARNING("Share rejected by pool: {}", result.reason);
-    }
-}
-
-void Miner::updateMetrics() {
-    std::lock_guard<std::mutex> lock(m_statsMutex);
+    m_miningActive = false;
+    LOG_INFO("Stopping mining threads...");
     
-    // Calculate hashrate (simplified)
-    auto now = std::chrono::steady_clock::now();
-    auto duration = std::chrono::duration_cast<std::chrono::seconds>(now - m_startTime).count();
-    if (duration > 0) {
-        m_currentHashrate = static_cast<double>(m_totalHashes.load()) / duration;
-    }
-    
-    // Get temperature from CPU throttle manager
-    if (m_cpuThrottleManager) {
-        m_temperature = 45.0; // Simplified temperature reading
-    }
-    
-    // Estimate power consumption (simplified)
-    m_powerConsumption = m_temperature * 0.1; // Rough estimate
-}
-
-void Miner::handleCPUThrottling() {
-    if (!m_cpuThrottleManager) {
-        return;
-    }
-    
-    if (m_cpuThrottleManager->isThrottling()) {
-        double throttleLevel = m_cpuThrottleManager->getThrottleLevel();
-        double cpuUsage = m_cpuThrottleManager->getCPUUsage();
-        LOG_DEBUG("CPU throttling active - Usage: {:.1f}%, Throttle: {:.1f}%", 
-                 cpuUsage, throttleLevel * 100);
-        
-        // Reduce mining intensity based on CPU demand
-        if (throttleLevel > 0.3) {
-            // Reduce GPU workload when CPU is busy
-            std::this_thread::sleep_for(std::chrono::milliseconds(static_cast<int>(throttleLevel * 200)));
+    // Wait for mining threads to finish
+    for (auto& thread : m_miningThreads) {
+        if (thread.joinable()) {
+            thread.join();
         }
     }
-}
-
-double Miner::getCPUUsage() const {
-    if (m_cpuThrottleManager) {
-        return m_cpuThrottleManager->getCPUUsage();
-    }
-    return 0.0;
-}
-
-// Helper function to convert bytes to hex string
-std::string Miner::bytesToHex(const std::vector<uint8_t>& bytes) {
-    std::string hex;
-    hex.reserve(bytes.size() * 2);
+    m_miningThreads.clear();
     
-    for (uint8_t byte : bytes) {
-        char hexByte[3];
-        snprintf(hexByte, sizeof(hexByte), "%02x", byte);
-        hex += hexByte;
-    }
-    
-    return hex;
+    LOG_INFO("Mining stopped");
 }

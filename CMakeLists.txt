@@ -45,7 +45,7 @@ set(SOURCES
     src/main.cpp
     src/miner.cpp
     src/randomx_native.cpp
-    src/metal_gpu.cpp
+    src/metal_gpu_simple.cpp
     src/cpu_throttle_manager.cpp
     src/pool_connection.cpp
     src/config_manager.cpp
@@ -58,7 +58,7 @@ set(SOURCES
 set(HEADERS
     include/miner.h
     include/randomx_native.h
-    include/metal_gpu.h
+    include/metal_gpu_simple.h
     include/cpu_throttle_manager.h
     include/pool_connection.h
     include/config_manager.h

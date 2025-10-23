@@ -4,6 +4,8 @@
 #include <cctype>
 #include <sstream>
 #include <string>
+#include <vector>
+#include <map>
 
 SimpleJSON::SimpleJSON() {
     LOG_DEBUG("SimpleJSON constructor called");

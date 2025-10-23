@@ -4,6 +4,9 @@
 #include <numeric>
 #include <fstream>
 #include <iomanip>
+#include <mutex>
+#include <thread>
+#include <chrono>
 
 PerformanceMonitor::PerformanceMonitor() : m_active(false), m_shouldStop(false) {
     LOG_DEBUG("PerformanceMonitor constructor called");
@@ -72,8 +75,7 @@ void PerformanceMonitor::updateMiningMetrics(uint64_t hashes, double hashrate, d
     sampleCount++;
     m_averageHashrate = totalHashrate / sampleCount;
     
-    // Update peak hashrate using C23 constexpr
-    constexpr auto peakThreshold = 0.0;
+    // Update peak hashrate
     if (hashrate > m_peakHashrate) {
         m_peakHashrate = hashrate;
     }

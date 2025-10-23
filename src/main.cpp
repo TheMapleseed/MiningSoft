@@ -87,6 +87,8 @@ int main(int argc, char* argv[]) {
         else if (logLevel == "warn") level = Logger::Level::Warning;
         else if (logLevel == "error") level = Logger::Level::Error;
         
+        LOG_INFO("Setting log level to: {}", logLevel);
+        
         if (!g_logger->initialize(level, logFile, console)) {
             std::cerr << "Failed to initialize logger\n";
             return 1;
@@ -99,7 +101,7 @@ int main(int argc, char* argv[]) {
         g_miner = std::make_unique<Miner>();
         
         // Initialize miner with command line configuration
-        if (!g_miner->initialize(std::make_shared<ConfigManager>(configManager))) {
+        if (!g_miner->initialize(configManager)) {
             LOG_ERROR("Failed to initialize miner");
             return 1;
         }
@@ -110,38 +112,12 @@ int main(int argc, char* argv[]) {
         g_miner->start();
         LOG_INFO("Mining started");
         
-        // Print initial statistics
-        auto stats = g_miner->getStats();
-        LOG_INFO("Initial stats - Hashrate: {:.2f} H/s, Temperature: {:.1f}°C", 
-                stats.hashrate, stats.temperature);
-        
         // Main loop - wait for miner to finish
         while (g_miner->isRunning()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
-            
-            // Print periodic statistics
-            static auto lastStatsTime = std::chrono::steady_clock::now();
-            auto now = std::chrono::steady_clock::now();
-            if (std::chrono::duration_cast<std::chrono::seconds>(now - lastStatsTime).count() >= 30) {
-                auto currentStats = g_miner->getStats();
-                LOG_INFO("Stats - Hashrate: {:.2f} H/s, Total: {} H, Accepted: {}, Rejected: {}, Temp: {:.1f}°C",
-                        currentStats.hashrate, currentStats.totalHashes, 
-                        currentStats.acceptedShares, currentStats.rejectedShares,
-                        currentStats.temperature);
-                lastStatsTime = now;
-            }
         }
         
         LOG_INFO("Mining stopped");
-        
-        // Print final statistics
-        auto finalStats = g_miner->getStats();
-        auto duration = std::chrono::duration_cast<std::chrono::seconds>(
-            std::chrono::steady_clock::now() - finalStats.startTime).count();
-        
-        LOG_INFO("Final stats - Duration: {}s, Total: {} H, Avg: {:.2f} H/s, Accepted: {}, Rejected: {}",
-                duration, finalStats.totalHashes, finalStats.hashrate,
-                finalStats.acceptedShares, finalStats.rejectedShares);
         
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;
