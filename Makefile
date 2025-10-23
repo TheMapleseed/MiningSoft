@@ -4,8 +4,8 @@
 CXX = clang++
 CXXFLAGS = -std=c++23 -O3 -flto -fvectorize -DAPPLE_SILICON_OPTIMIZED -DAPPLE_SILICON_UNIVERSAL
 INCLUDES = -Iinclude -Isrc
-SOURCES = src/main.cpp src/miner.cpp src/randomx.cpp src/config_manager.cpp src/logger.cpp src/simple_json.cpp
-HEADERS = include/miner.h include/randomx.h include/config_manager.h include/logger.h include/simple_json.h
+SOURCES = src/main.cpp src/miner.cpp src/randomx.cpp src/config_manager.cpp src/logger.cpp src/simple_json.cpp src/cli_manager.cpp
+HEADERS = include/miner.h include/randomx.h include/config_manager.h include/logger.h include/simple_json.h include/cli_manager.h
 TARGET = monero-miner
 
 # Apple Silicon specific frameworks and libraries

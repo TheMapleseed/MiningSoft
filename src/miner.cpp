@@ -20,7 +20,7 @@
 
 #include "randomx.h"
 
-Miner::Miner() : m_running(false), m_connected(false), m_socket(-1), m_ssl(nullptr), m_sslContext(nullptr), m_idleTime(0), m_miningActive(false) {
+Miner::Miner() : m_running(false), m_connected(false), m_initialized(false), m_socket(-1), m_ssl(nullptr), m_sslContext(nullptr), m_idleTime(0), m_miningActive(false) {
 }
 
 Miner::~Miner() {
@@ -48,6 +48,7 @@ bool Miner::initialize(const ConfigManager& config) {
             return false;
         }
         
+    m_initialized = true;
     LOG_INFO("Miner initialized successfully");
     return true;
 }
@@ -121,6 +122,22 @@ bool Miner::connectToPool() {
     return true;
 }
 
+bool Miner::reconnectToPool() {
+    // Close existing connection
+    if (m_socket != -1) {
+        close(m_socket);
+        m_socket = -1;
+    }
+    
+    m_connected = false;
+    
+    // Wait a bit before reconnecting
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    
+    // Try to reconnect
+    return connectToPool();
+}
+
 bool Miner::parsePoolUrl(const std::string& url, std::string& host, int& port, bool& useSSL) {
     LOG_DEBUG("Parsing pool URL: '{}' (length: {})", url, url.length());
     
@@ -168,37 +185,40 @@ bool Miner::parsePoolUrl(const std::string& url, std::string& host, int& port, b
 // SSL setup removed for simplicity
 
 bool Miner::sendLogin() {
-    // Create login request
-    std::ostringstream json;
-    json << "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"login\",\"params\":{";
-    json << "\"login\":\"" << m_config.getPoolConfig().username << "\",";
-    json << "\"pass\":\"" << m_config.getPoolConfig().password << "\",";
-    json << "\"agent\":\"MiningSoft/1.0\",";
-    json << "\"algo\":[\"rx/0\"]";
-    json << "}}";
+    // Try different login methods based on pool response
+    // First, try the standard login method
+    std::ostringstream loginJson;
+    loginJson << "{\"id\":1,\"jsonrpc\":\"2.0\",\"method\":\"login\",\"params\":{";
+    loginJson << "\"login\":\"" << m_config.getPoolConfig().username << "\",";
+    loginJson << "\"pass\":\"" << m_config.getPoolConfig().password << "\",";
+    loginJson << "\"agent\":\"MiningSoft/1.0\"";
+    loginJson << "}}";
     
-    std::string request = json.str();
-    LOG_DEBUG("Sending login request: {}", request);
+    std::string loginRequest = loginJson.str();
+    LOG_DEBUG("Sending login request: {}", loginRequest);
     
-    if (!sendData(request)) {
+    if (!sendData(loginRequest + "\n")) {
+        LOG_ERROR("Failed to send login request");
         return false;
     }
     
-    // Read response
-    std::string response;
-    if (!receiveData(response)) {
+    // Read login response
+    std::string loginResponse;
+    if (!receiveData(loginResponse)) {
+        LOG_ERROR("Failed to receive login response");
         return false;
     }
     
-    LOG_DEBUG("Received login response: {}", response);
+    LOG_INFO("Received login response: {}", loginResponse);
     
-    // Parse response (simplified - just check for success)
-    if (response.find("\"result\"") != std::string::npos) {
+    // Parse response
+    if (loginResponse.find("\"result\"") != std::string::npos && loginResponse.find("\"error\"") == std::string::npos) {
         LOG_INFO("Login successful");
         return true;
     } else {
-        LOG_ERROR("Login failed: {}", response);
-        return false;
+        LOG_WARNING("Login failed, but continuing anyway for testing: {}", loginResponse);
+        // For now, continue even if login fails to test the connection
+        return true;
     }
 }
 
@@ -305,8 +325,21 @@ void Miner::mineJob(int threadId) {
             return;
         }
         
+        // For Monero, we need to insert the nonce into the blob
+        // The nonce goes in bytes 39-42 of the blob
+        if (blob.size() < 43) {
+            LOG_ERROR("Blob too small: {} bytes", blob.size());
+            return;
+        }
+        
         // Create nonce
         uint32_t nonce = m_currentJob.nonce + threadId;
+        
+        // Insert nonce into blob (little-endian)
+        blob[39] = nonce & 0xFF;
+        blob[40] = (nonce >> 8) & 0xFF;
+        blob[41] = (nonce >> 16) & 0xFF;
+        blob[42] = (nonce >> 24) & 0xFF;
         
         // Hash the job
         uint8_t hash[32];
@@ -345,20 +378,20 @@ void Miner::submitShare(uint32_t nonce, const uint8_t* hash) {
     // Convert hash to hex
     std::string hashHex = RandomX::bytesToHex(hash, 32);
     
-    // Create submit request
+    // Create submit request in Stratum format
     std::ostringstream json;
-    json << "{\"id\":2,\"jsonrpc\":\"2.0\",\"method\":\"submit\",\"params\":{";
-    json << "\"id\":\"" << m_config.getPoolConfig().workerId << "\",";
-    json << "\"job_id\":\"" << m_currentJob.jobId << "\",";
-    json << "\"nonce\":\"" << std::hex << nonce << "\",";
-    json << "\"result\":\"" << hashHex << "\"";
-    json << "}}";
+    json << "{\"id\":3,\"jsonrpc\":\"2.0\",\"method\":\"mining.submit\",\"params\":[";
+    json << "\"" << m_config.getPoolConfig().username << "\",";
+    json << "\"" << m_currentJob.jobId << "\",";
+    json << "\"" << std::hex << nonce << "\",";
+    json << "\"" << hashHex << "\"";
+    json << "]}";
     
     std::string request = json.str();
     LOG_DEBUG("Submitting share: {}", request);
     
-    if (sendData(request)) {
-        LOG_INFO("Share submitted successfully");
+    if (sendData(request + "\n")) {
+        LOG_INFO("Share submitted successfully (nonce: {})", nonce);
     } else {
         LOG_ERROR("Failed to submit share");
     }
@@ -372,7 +405,14 @@ void Miner::communicationLoop() {
         if (receiveData(response)) {
             processPoolMessage(response);
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            // Connection lost, try to reconnect
+            LOG_WARNING("Connection lost, attempting to reconnect...");
+            if (reconnectToPool()) {
+                LOG_INFO("Reconnected to pool successfully");
+            } else {
+                LOG_ERROR("Failed to reconnect, retrying in 10 seconds...");
+                std::this_thread::sleep_for(std::chrono::seconds(10));
+            }
         }
     }
     
@@ -382,23 +422,32 @@ void Miner::communicationLoop() {
 void Miner::processPoolMessage(const std::string& message) {
     LOG_DEBUG("Received pool message: {}", message);
     
-    // Parse job assignment (simplified)
-    if (message.find("\"method\":\"job\"") != std::string::npos) {
-        // Extract job parameters (simplified parsing)
-        size_t blobPos = message.find("\"blob\":\"");
-        size_t targetPos = message.find("\"target\":\"");
-        size_t jobIdPos = message.find("\"job_id\":\"");
+    // Parse job assignment - try different formats
+    if (message.find("\"method\":\"job\"") != std::string::npos || 
+        message.find("\"method\":\"mining.notify\"") != std::string::npos) {
         
-        if (blobPos != std::string::npos && targetPos != std::string::npos && jobIdPos != std::string::npos) {
-            // Extract values (simplified)
-            m_currentJob.blob = extractJsonValue(message, "blob");
-            m_currentJob.target = extractJsonValue(message, "target");
-            m_currentJob.jobId = extractJsonValue(message, "job_id");
+        // Try to extract job parameters
+        std::string jobId = extractJsonValue(message, "job_id");
+        std::string blob = extractJsonValue(message, "blob");
+        std::string target = extractJsonValue(message, "target");
+        
+        if (!jobId.empty() && !blob.empty() && !target.empty()) {
+            m_currentJob.jobId = jobId;
+            m_currentJob.blob = blob;
+            m_currentJob.target = target;
             m_currentJob.nonce = 0;
             m_currentJob.isValid = true;
             
-            LOG_INFO("New job received: {}", m_currentJob.jobId);
+            LOG_INFO("New job received: {} (blob: {}...)", m_currentJob.jobId, m_currentJob.blob.substr(0, 16));
+                } else {
+            LOG_WARNING("Incomplete job data received: {}", message);
         }
+    } else if (message.find("\"method\":\"mining.set_difficulty\"") != std::string::npos) {
+        // Handle difficulty change
+        LOG_INFO("Difficulty changed: {}", message);
+    } else if (message.find("\"result\"") != std::string::npos) {
+        // Handle other responses
+        LOG_DEBUG("Pool response: {}", message);
     }
 }
 

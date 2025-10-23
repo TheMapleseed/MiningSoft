@@ -1,6 +1,7 @@
 #include "miner.h"
 #include "config_manager.h"
 #include "logger.h"
+#include "cli_manager.h"
 #include <iostream>
 #include <signal.h>
 #include <memory>
@@ -54,10 +55,11 @@ int main(int argc, char* argv[]) {
     signal(SIGTERM, signalHandler);
     
     try {
-        // Initialize logger first
-        g_logger = std::make_unique<Logger>();
+        // Check for CLI mode vs direct mining mode
+        bool cliMode = true;
+        bool autoStart = false;
         
-        // Check for help or version first
+        // Check command line arguments for mode selection
         for (int i = 1; i < argc; i++) {
             std::string arg = argv[i];
             if (arg == "--help" || arg == "-h" || arg == "help") {
@@ -68,56 +70,81 @@ int main(int argc, char* argv[]) {
                 printVersion();
                 return 0;
             }
+            if (arg == "--mining" || arg == "-m") {
+                cliMode = false;
+                autoStart = true;
+            }
+            if (arg == "--cli" || arg == "-c") {
+                cliMode = true;
+            }
         }
         
-        // Parse command line arguments
-        ConfigManager configManager;
-        if (!configManager.loadFromArgs(argc, argv)) {
-            std::cerr << "Failed to parse command line arguments\n";
-            return 1;
+        if (cliMode) {
+            // Initialize CLI system
+            CLIManager cli;
+            if (!cli.initialize()) {
+                std::cerr << "Failed to initialize CLI system\n";
+                return 1;
+            }
+            
+            // Run CLI
+            cli.run();
+        } else {
+            // Direct mining mode (original behavior)
+            // Initialize logger first
+            g_logger = std::make_unique<Logger>();
+            
+            // Parse command line arguments
+            ConfigManager configManager;
+            if (!configManager.loadFromArgs(argc, argv)) {
+                std::cerr << "Failed to parse command line arguments\n";
+                return 1;
+            }
+            
+            // Initialize logger with configuration
+            const auto logLevel = configManager.getValue<std::string>("log-level", "info");
+            const auto logFile = configManager.getValue<std::string>("log-file", "");
+            const auto console = configManager.getValue<bool>("console", true);
+            
+            auto level = Logger::Level::Info;
+            if (logLevel == "debug") level = Logger::Level::Debug;
+            else if (logLevel == "warn") level = Logger::Level::Warning;
+            else if (logLevel == "error") level = Logger::Level::Error;
+            
+            LOG_INFO("Setting log level to: {}", logLevel);
+            
+            if (!g_logger->initialize(level, logFile, console)) {
+                std::cerr << "Failed to initialize logger\n";
+                return 1;
+            }
+            
+            LOG_INFO("Starting Monero Miner for Apple Silicon v1.0.0");
+            LOG_INFO("Compatible with all Apple Silicon: M1, M2, M3, M4, M5");
+            
+            // Create and initialize miner
+            g_miner = std::make_unique<Miner>();
+            
+            // Initialize miner with command line configuration
+            if (!g_miner->initialize(configManager)) {
+                LOG_ERROR("Failed to initialize miner");
+                return 1;
+            }
+            
+            LOG_INFO("Miner initialized successfully");
+            
+            if (autoStart) {
+                // Start mining
+                g_miner->start();
+                LOG_INFO("Mining started");
+                
+                // Main loop - wait for miner to finish
+                while (g_miner->isRunning()) {
+                    std::this_thread::sleep_for(std::chrono::seconds(1));
+                }
+                
+                LOG_INFO("Mining stopped");
+            }
         }
-        
-        // Initialize logger with configuration
-        const auto logLevel = configManager.getValue<std::string>("log-level", "info");
-        const auto logFile = configManager.getValue<std::string>("log-file", "");
-        const auto console = configManager.getValue<bool>("console", true);
-        
-        auto level = Logger::Level::Info;
-        if (logLevel == "debug") level = Logger::Level::Debug;
-        else if (logLevel == "warn") level = Logger::Level::Warning;
-        else if (logLevel == "error") level = Logger::Level::Error;
-        
-        LOG_INFO("Setting log level to: {}", logLevel);
-        
-        if (!g_logger->initialize(level, logFile, console)) {
-            std::cerr << "Failed to initialize logger\n";
-            return 1;
-        }
-        
-        LOG_INFO("Starting Monero Miner for Apple Silicon v1.0.0");
-        LOG_INFO("Compatible with all Apple Silicon: M1, M2, M3, M4, M5");
-        
-        // Create and initialize miner
-        g_miner = std::make_unique<Miner>();
-        
-        // Initialize miner with command line configuration
-        if (!g_miner->initialize(configManager)) {
-            LOG_ERROR("Failed to initialize miner");
-            return 1;
-        }
-        
-        LOG_INFO("Miner initialized successfully");
-        
-        // Start mining
-        g_miner->start();
-        LOG_INFO("Mining started");
-        
-        // Main loop - wait for miner to finish
-        while (g_miner->isRunning()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
-        
-        LOG_INFO("Mining stopped");
         
     } catch (const std::exception& e) {
         std::cerr << "Fatal error: " << e.what() << std::endl;

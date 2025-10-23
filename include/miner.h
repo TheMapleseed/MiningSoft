@@ -39,6 +39,9 @@ public:
     
     // Check if connected to pool
     bool isConnected() const { return m_connected; }
+    
+    // Check if miner is initialized
+    bool isInitialized() const { return m_initialized; }
 
 private:
     // RandomX initialization
@@ -46,6 +49,7 @@ private:
     
     // Pool connection
     bool connectToPool();
+    bool reconnectToPool();
     bool parsePoolUrl(const std::string& url, std::string& host, int& port, bool& useSSL);
     bool setupSSL();
     bool sendLogin();
@@ -79,6 +83,7 @@ private:
     // Mining state
     std::atomic<bool> m_running;
     std::atomic<bool> m_connected;
+    std::atomic<bool> m_initialized;
     MiningJob m_currentJob;
     
     // Threading

@@ -4,7 +4,7 @@
   "mining.useGPU": true,
   "mining.useHugePages": false,
   "mining.intensity": 100,
-  "pool.url": "stratum+tcp://pool.supportxmr.com:443",
+  "pool.url": "stratum+tcp://xmrpool.eu:3333",
   "pool.username": "4AdUndXHHZ6cFaeRHT7xZ5SEdWqRWk3xQwE7xqb3fLEgTzgknc2IKMRX5Kn7tXwv1Yk3gP1A6jtrtC4wBwj2iQj7",
   "pool.password": "x",
   "pool.workerId": "apple-silicon-miner",
