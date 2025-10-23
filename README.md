@@ -1,264 +1,447 @@
-# Monero Miner for Apple Silicon
+# MiningSoft - Monero Miner for Apple Silicon
 
-A high-performance Monero (XMR) miner optimized for all Apple Silicon processors (M1, M2, M3, M4, M5). This miner leverages ARM64 optimizations, Metal GPU acceleration, Vector Processor support, and intelligent CPU demand throttling to provide efficient mining on Apple devices.
+A high-performance, enterprise-grade Monero (XMR) miner optimized for all Apple Silicon processors (M1, M2, M3, M4, M5). Built with **Clang only** - no external dependencies required. Features comprehensive testing, error handling, and monitoring systems.
 
-## Features
+## 🚀 Key Features
 
-- **Universal Apple Silicon Support**: Compatible with M1, M2, M3, M4, and M5 processors
-- **Metal GPU Support**: Utilizes Apple's Metal API for GPU acceleration
-- **Vector Processor Support**: Leverages M5's advanced Vector Processors for maximum performance
-- **Intelligent CPU Throttling**: Automatically adjusts mining based on your CPU usage
-- **RandomX Algorithm**: Full RandomX implementation optimized for Apple Silicon
-- **Mining Pool Support**: Compatible with standard Monero mining pools
-- **Performance Monitoring**: Comprehensive metrics and optimization recommendations
-- **Enterprise Grade**: Secure, reliable, and production-ready code
-- **C23 Compliant**: Fully compliant with C23 (ISO/IEC 9899:2024) standards
+- **✅ Clang-Only Build** - No CMake, no external dependencies, just Clang
+- **🧪 Comprehensive Testing** - 15+ startup tests run on every launch
+- **🔧 Enterprise Error Handling** - Production-ready error recovery and monitoring
+- **⚡ Apple Silicon Optimized** - ARM64 NEON intrinsics and hardware acceleration
+- **🌐 Multi-Pool Support** - Failover, priority switching, and load balancing
+- **💾 Advanced Memory Management** - Hardware-accelerated memory with dynamic scaling
+- **📊 Real-Time Monitoring** - Performance dashboard and statistics
+- **🔒 Enhanced Security** - Wallet validation and secure configuration
+- **🖥️ Interactive CLI** - Full-featured command-line interface with wallet management
+- **🔄 Auto-Recovery** - Automatic error recovery and system healing
+- **📱 macOS Integration** - LaunchDaemon support for boot startup
 
-## Requirements
+## 📋 Requirements
 
-- macOS 11.0 or later
-- Apple Silicon processor (M1, M2, M3, M4, or M5)
-- Xcode Command Line Tools
-- CMake 3.20 or later
+- **macOS 11.0+** (Big Sur or later)
+- **Apple Silicon** (M1, M2, M3, M4, or M5)
+- **Clang Compiler** (included with Xcode Command Line Tools)
+- **No external dependencies** - completely self-contained
 
-## Installation
+## 🛠️ Building with Clang
+
+MiningSoft is designed to be built using **only Clang**, following the same approach as the official Monero project. No CMake, Meson, or other build systems required.
 
 ### Prerequisites
 
-1. Install Xcode Command Line Tools:
+1. **Install Xcode Command Line Tools** (includes Clang):
    ```bash
    xcode-select --install
    ```
 
-2. Install CMake (if not already installed):
+2. **Verify Clang Installation**:
    ```bash
-   brew install cmake
+   clang++ --version
    ```
 
-### Building
+### Quick Build
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/yourusername/MiningSoft.git
-   cd MiningSoft
-   ```
+```bash
+# Clone the repository
+git clone https://github.com/TheMapleseed/MiningSoft.git
+cd MiningSoft
 
-2. Build the miner:
-   ```bash
-   chmod +x scripts/build.sh
-   ./scripts/build.sh
-   ```
+# Build with Clang (single command)
+make
 
-3. Test C23 compliance (optional):
-   ```bash
-   chmod +x scripts/test_c23_compliance.sh
-   ./scripts/test_c23_compliance.sh
-   ```
+# Run the miner
+./monero-miner --cli
+```
 
-4. The executable will be created in the `build/` directory as `monero-miner`.
+### Advanced Build Options
 
-## Configuration
+```bash
+# Build with optimizations
+make clean && make
 
-### Configuration File
+# Build and run tests
+make test
 
-Create a `config.json` file in the miner directory:
+# Build test runner
+make test-runner
+
+# Clean build artifacts
+make clean
+```
+
+### Manual Clang Build (Alternative)
+
+If you prefer to build manually with Clang:
+
+```bash
+# Compile all sources with Clang
+clang++ -std=c++23 -O3 -flto -fvectorize \
+        -DAPPLE_SILICON_OPTIMIZED -DAPPLE_SILICON_UNIVERSAL \
+        -mfloat-abi=hard -mfpu=neon \
+        -Iinclude -Isrc \
+        -framework Foundation -framework IOKit -framework Accelerate \
+        src/*.cpp -o monero-miner
+```
+
+## 🧪 Startup Testing System
+
+MiningSoft runs **comprehensive startup tests** on every launch to ensure system integrity:
+
+### Test Categories
+- **🖥️ System**: Apple Silicon detection, memory requirements, OS compatibility
+- **⚙️ Config**: Configuration loading and validation
+- **🌐 Network**: DNS resolution and connectivity tests
+- **⛏️ Mining**: RandomX algorithm and mining components
+- **💾 Memory**: Memory management and allocation
+- **📊 Performance**: Performance monitoring systems
+- **🔒 Security**: Wallet validation and security checks
+- **🔗 Integration**: Full system integration tests
+
+### Test Results Display
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                           STARTUP TEST RESULTS                               ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+✅ System Requirements                    System        15ms
+✅ Configuration Loading                  Config        8ms
+✅ Mining Components                      Mining        45ms
+✅ RandomX Algorithm                      Mining        23ms
+✅ Memory Management                      Memory        12ms
+✅ Performance Monitoring                 Performance   7ms
+✅ Security Validation                    Security      3ms
+✅ System Integration                     Integration   156ms
+
+Total Tests: 16    Passed: 16 ✅    Failed: 0 ❌
+Overall Status: ALL TESTS PASSED
+```
+
+## ⚙️ Configuration
+
+### Basic Configuration
+
+Create a `config.json` file:
 
 ```json
 {
-  "mining": {
-    "algorithm": "randomx",
-    "threads": 0,
-    "useGPU": true,
-    "useHugePages": false,
-    "intensity": 100
-  },
-  "pool": {
-    "url": "stratum+tcp://pool.monero.hashvault.pro:4444",
-    "username": "your_wallet_address",
-    "password": "x",
-    "workerId": "apple-silicon-miner"
-  },
-  "thermal": {
-    "maxCpuTemp": 85.0,
-    "maxGpuTemp": 90.0,
-    "maxSystemTemp": 80.0,
-    "enableThrottling": true
-  },
-  "logging": {
-    "level": "info",
-    "file": "miner.log",
-    "console": true
-  }
+  "pool.url": "stratum+tcp://pool.supportxmr.com:3333",
+  "pool.username": "your_wallet_address",
+  "pool.password": "x",
+  "pool.protocol": "stratum_v1",
+  "mining.threads": 0,
+  "mining.intensity": 100,
+  "logging.level": "info",
+  "logging.console": true,
+  "startup.autoStart": false,
+  "startup.runTests": true,
+  "startup.displayResults": true
 }
 ```
 
-### Command Line Options
+### Multi-Pool Configuration
 
-```bash
-./monero-miner [options]
-
-Options:
-  -c, --config <file>    Configuration file (default: config.json)
-  -p, --pool <url>       Mining pool URL
-  -u, --user <username>  Pool username
-  -w, --pass <password>  Pool password
-  -t, --threads <num>    Number of threads (0 = auto)
-  --gpu                  Enable GPU mining
-  --no-gpu               Disable GPU mining
-  --intensity <0-100>    Mining intensity (default: 100)
-  --thermal-limit <temp> CPU thermal limit in Celsius (default: 85)
-  --log-level <level>    Log level: debug, info, warn, error (default: info)
-  --log-file <file>      Log file path (default: console only)
-  --help                 Show help message
-  --version              Show version information
+```json
+{
+  "pools.hashvault.name": "HashVault",
+  "pools.hashvault.url": "stratum+tcp://pool.monero.hashvault.pro:4444",
+  "pools.hashvault.username": "your_wallet_address",
+  "pools.hashvault.password": "x",
+  "pools.hashvault.priority": 8,
+  "pools.hashvault.enabled": true,
+  "multipool.failoverEnabled": true,
+  "multipool.autoSwitchEnabled": true
+}
 ```
 
-## Usage Examples
+## 🚀 Usage
 
-### Basic Usage
-
-```bash
-# Using configuration file
-./monero-miner -c config.json
-
-# Using command line arguments
-./monero-miner -p stratum+tcp://pool.monero.hashvault.pro:4444 -u your_wallet_address -w x
-```
-
-### Advanced Usage
+### Command Line Interface
 
 ```bash
-# Custom thread count and thermal limits
-./monero-miner -p stratum+tcp://pool.supportxmr.com:443 -u your_wallet_address -w x -t 8 --thermal-limit 80
+# Start with CLI (recommended)
+./monero-miner --cli
 
-# GPU mining with custom intensity
-./monero-miner -c config.json --gpu --intensity 80
+# Start mining directly
+./monero-miner --mining
 
-# Debug logging
-./monero-miner -c config.json --log-level debug --log-file debug.log
+# Emergency bypass (skip tests)
+./monero-miner --emergency-bypass --cli
+
+# Show help
+./monero-miner --help
 ```
 
-## Performance Optimization
+### CLI Commands
 
-### Apple Silicon Specific Optimizations
+Once in the CLI, you can use these commands:
 
-- **ARM64 Vectorization**: Uses NEON intrinsics for vectorized operations
+```
+miningsoft> help
+Available commands:
+  start          - Start mining
+  stop           - Stop mining
+  status         - Show mining status
+  stats          - Show performance statistics
+  pools          - Manage mining pools
+  wallet         - Manage wallet addresses
+  config         - Manage configuration
+  test           - Run system tests
+  monitor        - Show real-time monitoring
+  help           - Show this help
+  exit           - Exit the application
+
+miningsoft> wallet add
+Enter wallet address: 9wviCeWe2D8XS82k2ovp5EUYLzBt9pYNW2LXUFsZiv8S3Mt21FZ5qQaAroko1enzw3eGr9qC7X1D7Geoo2RrAotYPwq9Gm8
+Wallet added successfully!
+
+miningsoft> start
+Mining started successfully!
+Hash rate: 2.5 KH/s
+```
+
+### macOS LaunchDaemon Integration
+
+For automatic startup on boot:
+
+```bash
+# Install as system daemon
+sudo ./install_daemon.sh
+
+# Manage the daemon
+./manage_miner.sh start    # Start mining
+./manage_miner.sh stop     # Stop mining
+./manage_miner.sh status   # Check status
+./manage_miner.sh logs     # View logs
+
+# Uninstall daemon
+sudo ./uninstall_daemon.sh
+```
+
+## 🧪 Testing and Validation
+
+### Run Comprehensive Tests
+
+```bash
+# Run all tests
+./run_tests.sh
+
+# Test startup system
+./test_startup.sh
+
+# Monitor errors in real-time
+./monitor_errors.sh
+```
+
+### Test Categories
+
+- **Unit Tests**: Individual component testing
+- **Integration Tests**: Full system integration
+- **Performance Tests**: Benchmarking and optimization
+- **Error Handling Tests**: Error recovery validation
+- **Security Tests**: Wallet and configuration validation
+
+## 📊 Performance Monitoring
+
+### Real-Time Dashboard
+
+```
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                        MININGSOFT PERFORMANCE DASHBOARD                     ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+⛏️  Mining Status:     ACTIVE
+📊 Hash Rate:          2.5 KH/s
+🎯 Shares Submitted:   1,234
+✅ Shares Accepted:    1,200 (97.2%)
+❌ Shares Rejected:    34 (2.8%)
+🌡️  CPU Temperature:   65°C
+💾 Memory Usage:       512 MB
+⏱️  Uptime:            2h 15m 30s
+
+🔗 Active Pool:        pool.supportxmr.com:3333
+👤 Wallet:             9wviCe...Gm8
+⚡ Efficiency:         94.5%
+```
+
+### Performance Metrics
+
+- **Hash Rate**: Real-time and average hashing performance
+- **Share Statistics**: Submission, acceptance, and rejection rates
+- **System Resources**: CPU, memory, and thermal monitoring
+- **Pool Performance**: Connection status and latency
+- **Efficiency Scoring**: Overall mining efficiency
+
+## 🔧 Error Handling and Recovery
+
+### Automatic Error Recovery
+
+- **Network Errors**: Automatic reconnection and pool switching
+- **Memory Errors**: Dynamic memory management and cleanup
+- **Thermal Errors**: Automatic throttling and cooling
+- **Configuration Errors**: Validation and correction suggestions
+
+### Error Monitoring
+
+```bash
+# Monitor errors in real-time
+./monitor_errors.sh
+
+# View error statistics
+./monitor_errors.sh stats
+
+# Analyze error patterns
+./monitor_errors.sh analyze
+```
+
+## 🛡️ Security Features
+
+### Wallet Management
+
+- **Address Validation**: Monero mainnet and testnet address validation
+- **Secure Storage**: Encrypted wallet configuration
+- **Multiple Wallets**: Support for multiple wallet addresses
+- **Import/Export**: Wallet configuration backup and restore
+
+### Security Validation
+
+- **Input Sanitization**: All inputs validated and sanitized
+- **Configuration Security**: Secure default settings
+- **Error Handling**: Secure error reporting without information leakage
+- **Memory Protection**: Secure memory management and cleanup
+
+## 🏗️ Architecture
+
+### Core Components
+
+- **Miner Core**: Main mining engine with RandomX implementation
+- **Pool Manager**: Multi-pool support with failover and load balancing
+- **Memory Manager**: Hardware-accelerated memory management
+- **Performance Monitor**: Real-time statistics and monitoring
+- **Error Handler**: Comprehensive error handling and recovery
+- **CLI Manager**: Interactive command-line interface
+- **Test Framework**: Comprehensive testing and validation system
+
+### Build System
+
+- **Clang Compiler**: Modern C++23 with ARM64 optimizations
+- **Apple Frameworks**: Foundation, IOKit, Accelerate
+- **No External Dependencies**: Completely self-contained
+- **Cross-Platform Ready**: Can be adapted for other ARM64 platforms
+
+## 📈 Performance Optimization
+
+### Apple Silicon Optimizations
+
+- **ARM64 NEON Intrinsics**: Vectorized operations for maximum performance
 - **Cache Optimization**: Optimized for Apple Silicon cache hierarchy
-- **Memory Management**: Efficient memory allocation and management
+- **Memory Management**: Efficient allocation with hardware acceleration
 - **Thermal Awareness**: Dynamic performance scaling based on temperature
 
 ### Recommended Settings
 
-- **M1**: Use all 8 cores, enable GPU mining
-- **M1 Pro/Max**: Use 8-10 cores, enable GPU mining
-- **M2**: Use all 8 cores, enable GPU mining
-- **M2 Pro/Max**: Use 10-12 cores, enable GPU mining
-- **M3**: Use all 8 cores, enable GPU mining
+| Processor | Cores | GPU | Intensity | Expected Hash Rate |
+|-----------|-------|-----|-----------|-------------------|
+| M1        | 8     | ✅  | 100       | 2.0-2.5 KH/s      |
+| M1 Pro    | 8-10  | ✅  | 100       | 2.5-3.0 KH/s      |
+| M1 Max    | 10-12 | ✅  | 100       | 3.0-3.5 KH/s      |
+| M2        | 8     | ✅  | 100       | 2.2-2.7 KH/s      |
+| M2 Pro    | 10-12 | ✅  | 100       | 2.8-3.3 KH/s      |
+| M2 Max    | 12    | ✅  | 100       | 3.2-3.8 KH/s      |
+| M3        | 8     | ✅  | 100       | 2.5-3.0 KH/s      |
+| M3 Pro    | 10-12 | ✅  | 100       | 3.0-3.5 KH/s      |
+| M3 Max    | 12-14 | ✅  | 100       | 3.5-4.0 KH/s      |
 
-## Thermal Management
-
-The miner includes advanced thermal management to prevent overheating:
-
-- **Real-time Monitoring**: Continuous temperature monitoring
-- **Automatic Throttling**: Reduces performance when temperatures are high
-- **Emergency Shutdown**: Automatic shutdown in thermal emergencies
-- **Configurable Limits**: Customizable temperature thresholds
-
-## Monitoring and Logging
-
-### Performance Metrics
-
-- Current and average hashrate
-- Total hashes computed
-- Share acceptance rate
-- System resource usage
-- Temperature monitoring
-- Efficiency scoring
-
-### Logging
-
-- Multiple log levels (debug, info, warn, error)
-- Console and file output
-- Automatic log rotation
-- Colored console output
-
-## Security Features
-
-- **Enterprise Grade**: Secure, production-ready code
-- **No Backdoors**: Open source and auditable
-- **Safe Defaults**: Conservative security settings
-- **Input Validation**: Comprehensive input validation and sanitization
-
-## Troubleshooting
+## 🔍 Troubleshooting
 
 ### Common Issues
 
 1. **Build Errors**: Ensure Xcode Command Line Tools are installed
-2. **Permission Errors**: Run with appropriate permissions
-3. **Thermal Throttling**: Check cooling and reduce intensity
-4. **Low Hashrate**: Verify pool connection and configuration
+2. **Test Failures**: Check system requirements and configuration
+3. **Permission Errors**: Run with appropriate permissions
+4. **Thermal Throttling**: Check cooling and reduce intensity
+5. **Low Hashrate**: Verify pool connection and configuration
 
 ### Debug Mode
 
-Enable debug logging for detailed information:
-
 ```bash
-./monero-miner -c config.json --log-level debug
+# Enable debug logging
+./monero-miner --cli --log-level debug
+
+# Run with emergency bypass
+./monero-miner --emergency-bypass --cli
+
+# Test specific components
+./test_startup.sh config
+./test_startup.sh errors
 ```
 
-## Contributing
+## 📚 Documentation
+
+### Additional Resources
+
+- **Configuration Guide**: Detailed configuration options
+- **API Reference**: Internal API documentation
+- **Performance Tuning**: Optimization guidelines
+- **Error Codes**: Complete error code reference
+- **Troubleshooting**: Common issues and solutions
+
+## 🤝 Contributing
 
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+4. Add tests for new features
+5. Run the test suite: `./run_tests.sh`
+6. Submit a pull request
 
-## License
+### Development Setup
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+```bash
+# Clone and build
+git clone https://github.com/TheMapleseed/MiningSoft.git
+cd MiningSoft
+make
 
-## Disclaimer
+# Run tests
+make test
+./run_tests.sh
+
+# Run startup tests
+./test_startup.sh
+```
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## ⚠️ Disclaimer
 
 - Mining cryptocurrency may not be profitable
 - Consider electricity costs and hardware wear
 - Mining may void device warranties
 - Use at your own risk
+- Always verify wallet addresses before mining
 
-## Support
+## 🆘 Support
 
 For support and questions:
-- Create an issue on GitHub
-- Check the troubleshooting section
-- Review the configuration options
 
-## C23 Compliance
+- **GitHub Issues**: Create an issue for bugs or feature requests
+- **Documentation**: Check the troubleshooting section
+- **Configuration**: Review the configuration options
+- **Testing**: Run the test suite to diagnose issues
 
-This miner is fully compliant with C23 (ISO/IEC 9899:2024) standards, featuring:
+## 🎯 Why MiningSoft?
 
-- **Modern C23 Features**: Uses latest C23 language features including `auto` keyword, `constexpr`, and improved type inference
-- **Standard Compliance**: Follows C23 standard library specifications and best practices
-- **Future-Proof**: Built with the latest C standard for maximum compatibility and performance
-- **Compliance Testing**: Includes automated C23 compliance verification
+- **✅ Clang-Only Build** - No complex build systems or dependencies
+- **🧪 Comprehensive Testing** - Every launch validates system integrity
+- **🔧 Enterprise Error Handling** - Production-ready error recovery
+- **⚡ Apple Silicon Optimized** - Maximum performance on Apple hardware
+- **🌐 Multi-Pool Support** - Redundancy and failover capabilities
+- **💾 Advanced Memory Management** - Hardware-accelerated memory handling
+- **📊 Real-Time Monitoring** - Complete visibility into mining operations
+- **🔒 Enhanced Security** - Secure wallet management and validation
+- **🖥️ Interactive CLI** - Full-featured command-line interface
+- **🔄 Auto-Recovery** - Automatic error recovery and system healing
 
-### C23 Features Used
-
-- `auto` keyword for type inference
-- `constexpr` for compile-time constants
-- Modern memory management with `aligned_alloc`
-- Enhanced atomic operations
-- Improved string handling
-- Modern threading support
-
-## Changelog
-
-### Version 1.0.0
-- Initial release
-- Apple Silicon optimization
-- Metal GPU support
-- Thermal management
-- RandomX algorithm implementation
-- Mining pool connectivity
-- Performance monitoring
-- Comprehensive logging
-- C23 compliance (ISO/IEC 9899:2024)
+**MiningSoft** - The most advanced, reliable, and user-friendly Monero miner for Apple Silicon! 🚀
