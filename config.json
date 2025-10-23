@@ -1,0 +1,39 @@
+{
+  "mining": {
+    "algorithm": "randomx",
+    "threads": 0,
+    "useGPU": true,
+    "useHugePages": false,
+    "intensity": 100
+  },
+  "pool": {
+    "url": "stratum+tcp://pool.monero.hashvault.pro:4444",
+    "username": "your_wallet_address",
+    "password": "x",
+    "workerId": "apple-silicon-miner",
+    "port": 4444,
+    "ssl": false,
+    "timeout": 30,
+    "keepAlive": 60
+  },
+  "cpuThrottling": {
+    "lowThreshold": 20.0,
+    "highThreshold": 60.0,
+    "maxThreshold": 80.0,
+    "enableThrottling": true,
+    "monitoringInterval": 500
+  },
+  "logging": {
+    "level": "info",
+    "file": "miner.log",
+    "console": true,
+    "maxFileSize": 10485760,
+    "maxFiles": 5
+  },
+  "performance": {
+    "enableMetrics": true,
+    "metricsInterval": 5000,
+    "enableProfiling": false,
+    "profileFile": "profile.json"
+  }
+}
